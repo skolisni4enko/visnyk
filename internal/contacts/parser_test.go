@@ -19,15 +19,19 @@ func TestParseText_SingleColumn(t *testing.T) {
 }
 
 func TestParseText_WithNames(t *testing.T) {
+	// Now only phones are processed — names ignored, but phones still extracted
 	res := ParseText("Ivan +380991234567\nOlena, 0991234568")
 	if len(res.Contacts) != 2 {
 		t.Fatalf("want 2 got %d %+v", len(res.Contacts), res)
 	}
-	if res.Contacts[0].Name != "Ivan" {
-		t.Errorf("want Ivan got %q", res.Contacts[0].Name)
+	if res.Contacts[0].Name != "" {
+		t.Errorf("names should be ignored, want empty got %q", res.Contacts[0].Name)
 	}
-	if res.Contacts[1].Name != "Olena" {
-		t.Errorf("want Olena got %q", res.Contacts[1].Name)
+	if res.Contacts[0].NormalizedPhone != "+380991234567" {
+		t.Errorf("phone mismatch %q", res.Contacts[0].NormalizedPhone)
+	}
+	if res.Contacts[1].NormalizedPhone != "+380991234568" {
+		t.Errorf("phone mismatch %q", res.Contacts[1].NormalizedPhone)
 	}
 }
 
@@ -64,8 +68,11 @@ func TestParseCSV_Comma(t *testing.T) {
 	if len(res.Contacts) != 2 {
 		t.Fatalf("want 2 got %d invalid=%v", len(res.Contacts), res.Invalid)
 	}
-	if res.Contacts[0].Name != "Ivan" {
-		t.Errorf("name mismatch %q", res.Contacts[0].Name)
+	if res.Contacts[0].Name != "" {
+		t.Errorf("names should be ignored, want empty got %q", res.Contacts[0].Name)
+	}
+	if res.Contacts[0].NormalizedPhone != "+380991234567" {
+		t.Errorf("phone mismatch %q", res.Contacts[0].NormalizedPhone)
 	}
 }
 

@@ -17,16 +17,13 @@ import (
 var splitRe = regexp.MustCompile(`[\n,;\t]+`)
 
 // ParseText splits raw text by newline, comma, semicolon, tab and normalizes each token.
-// Supports formats: "0991234567 +380... 380..." and "Name, +380..." lines.
-// For lines with two tokens where one looks like phone, treats other as name.
+// Only phone numbers are processed — names are ignored.
 func ParseText(raw string) ParseResult {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ParseResult{}
 	}
-	// First split by lines to preserve name association.
 	lines := strings.Split(raw, "\n")
-	var total int
 	seen := make(map[string]struct{})
 	var contacts []cascade.Contact
 	var invalid []InvalidEntry
@@ -39,10 +36,7 @@ func ParseText(raw string) ParseResult {
 			continue
 		}
 		rowIdx++
-		// Try to detect "name phone" or "phone name" or "name,phone" etc on same line.
-		// Split by comma/semicolon/tab first, then spaces heuristically.
 		parts := splitRe.Split(line, -1)
-		// Filter empty
 		var tokens []string
 		for _, p := range parts {
 			p = strings.TrimSpace(p)
@@ -53,14 +47,10 @@ func ParseText(raw string) ParseResult {
 		if len(tokens) == 0 {
 			continue
 		}
-		// If tokens contain spaces (e.g. "Ivan 099 123 45 67"), splitRe already split by comma/semicolon/tab but not spaces.
-		// So further split tokens that contain spaces but look like multiple phones/names.
-		// Expand tokens with spaces: if token contains space, try to extract phone and name.
+		// Expand tokens containing spaces. If token without letters and normalizes as phone, keep as one.
 		var expanded []string
 		for _, t := range tokens {
 			if strings.Contains(t, " ") {
-				// If token contains letters, it's likely "Name phone" — split anyway
-				// phonenumbers is permissive and may parse "Ivan +380..." as valid
 				hasLetter := false
 				for _, r := range t {
 					if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= 'А' && r <= 'я') || r == 'ґ' || r == 'Ґ' || r == 'є' || r == 'Є' || r == 'і' || r == 'І' || r == 'ї' || r == 'Ї' {
@@ -80,87 +70,26 @@ func ParseText(raw string) ParseResult {
 				expanded = append(expanded, t)
 			}
 		}
-		tokens = expanded
-
-		// Now handle tokens: if 1 token -> phone only
-		// if 2 tokens -> one is phone, other is name
-		// if >2 -> try to find phone tokens, each phone becomes a contact
-		if len(tokens) == 1 {
-			total++
-			phoneRaw := tokens[0]
-			norm, err := normalizer.Normalize(phoneRaw)
-			if err != nil {
-				invalid = append(invalid, InvalidEntry{Row: rowIdx, Raw: phoneRaw, Error: err.Error()})
-				continue
-			}
-			if _, exists := seen[norm]; exists {
-				dup++
-				continue
-			}
-			seen[norm] = struct{}{}
-			contacts = append(contacts, cascade.Contact{Name: "", PhoneRaw: phoneRaw, NormalizedPhone: norm})
-		} else if len(tokens) == 2 {
-			// Determine which is phone
-			norm0, err0 := normalizer.Normalize(tokens[0])
-			norm1, err1 := normalizer.Normalize(tokens[1])
-			if err0 == nil && err1 != nil {
-				total++
-				norm := norm0
+		// Only phones — names ignored
+		foundPhone := false
+		for _, tok := range expanded {
+			norm, err := normalizer.Normalize(tok)
+			if err == nil {
+				foundPhone = true
 				if _, exists := seen[norm]; exists {
 					dup++
 					continue
 				}
 				seen[norm] = struct{}{}
-				contacts = append(contacts, cascade.Contact{Name: tokens[1], PhoneRaw: tokens[0], NormalizedPhone: norm})
-			} else if err0 != nil && err1 == nil {
-				total++
-				norm := norm1
-				if _, exists := seen[norm]; exists {
-					dup++
-					continue
-				}
-				seen[norm] = struct{}{}
-				contacts = append(contacts, cascade.Contact{Name: tokens[0], PhoneRaw: tokens[1], NormalizedPhone: norm})
-			} else if err0 == nil && err1 == nil {
-				// Both look like phones -> create two contacts
-				for i, tok := range []string{tokens[0], tokens[1]} {
-					total++
-					norm := []string{norm0, norm1}[i]
-					if _, exists := seen[norm]; exists {
-						dup++
-						continue
-					}
-					seen[norm] = struct{}{}
-					contacts = append(contacts, cascade.Contact{Name: "", PhoneRaw: tok, NormalizedPhone: norm})
-				}
-			} else {
-				// Neither is phone -> invalid
-				total++
-				invalid = append(invalid, InvalidEntry{Row: rowIdx, Raw: line, Error: err0.Error()})
-			}
-		} else {
-			// >2 tokens: treat each token that normalizes as phone
-			foundPhone := false
-			for _, tok := range tokens {
-				norm, err := normalizer.Normalize(tok)
-				if err == nil {
-					foundPhone = true
-					total++
-					if _, exists := seen[norm]; exists {
-						dup++
-						continue
-					}
-					seen[norm] = struct{}{}
-					contacts = append(contacts, cascade.Contact{Name: "", PhoneRaw: tok, NormalizedPhone: norm})
-				}
-			}
-			if !foundPhone {
-				total++
-				invalid = append(invalid, InvalidEntry{Row: rowIdx, Raw: line, Error: "no valid phone found"})
+				contacts = append(contacts, cascade.Contact{Name: "", PhoneRaw: tok, NormalizedPhone: norm})
 			}
 		}
+		if !foundPhone {
+			invalid = append(invalid, InvalidEntry{Row: rowIdx, Raw: line, Error: "no valid phone found"})
+		}
 	}
-	return ParseResult{Contacts: contacts, Invalid: invalid, Duplicates: dup, Total: total + len(invalid)}
+	total := len(contacts) + len(invalid) + dup
+	return ParseResult{Contacts: contacts, Invalid: invalid, Duplicates: dup, Total: total}
 }
 
 // ParseCSV parses CSV content with delimiter auto-detect (, ; \t).
@@ -206,7 +135,6 @@ func ParseCSV(r io.Reader) ParseResult {
 		if len(row) == 0 {
 			continue
 		}
-		// skip empty rows
 		empty := true
 		for _, c := range row {
 			if strings.TrimSpace(c) != "" {
@@ -218,38 +146,65 @@ func ParseCSV(r io.Reader) ParseResult {
 			continue
 		}
 		total++
-		var phoneRaw, name string
-		if len(row) == 1 {
-			phoneRaw = strings.TrimSpace(row[0])
-		} else {
-			if phoneCol >= 0 && phoneCol < len(row) {
-				phoneRaw = strings.TrimSpace(row[phoneCol])
-				// name is first non-phone column with text
-				for idx, c := range row {
-					if idx == phoneCol {
-						continue
-					}
-					c = strings.TrimSpace(c)
-					if c != "" {
-						name = c
-						break
-					}
-				}
-			} else {
-				// fallback: first col phone, second name
-				phoneRaw = strings.TrimSpace(row[0])
-				if len(row) > 1 {
-					name = strings.TrimSpace(row[1])
+		// Only phones — scan all cells for phones, ignore names
+		// Prefer phoneCol if it normalizes, otherwise scan all cells
+		var phoneRaw string
+		var norm string
+		var found bool
+		if phoneCol >= 0 && phoneCol < len(row) {
+			cand := strings.TrimSpace(row[phoneCol])
+			if cand != "" {
+				if n, err := normalizer.Normalize(cand); err == nil {
+					phoneRaw = cand
+					norm = n
+					found = true
 				}
 			}
 		}
-		if phoneRaw == "" {
-			invalid = append(invalid, InvalidEntry{Row: i + 1, Raw: strings.Join(row, string(delim)), Name: name, Error: "empty phone"})
-			continue
+		if !found {
+			// scan all cells for first valid phone; also handle cells containing multiple numbers separated by delimiters/spaces
+			for _, c := range row {
+				c = strings.TrimSpace(c)
+				if c == "" {
+					continue
+				}
+				if n, err := normalizer.Normalize(c); err == nil {
+					phoneRaw = c
+					norm = n
+					found = true
+					break
+				}
+				// try split cell by delimiters/spaces
+				for _, tok := range splitRe.Split(c, -1) {
+					tok = strings.TrimSpace(tok)
+					if tok == "" {
+						continue
+					}
+					if n, err := normalizer.Normalize(tok); err == nil {
+						phoneRaw = tok
+						norm = n
+						found = true
+						break
+					}
+					for _, sub := range strings.Fields(tok) {
+						if n, err := normalizer.Normalize(sub); err == nil {
+							phoneRaw = sub
+							norm = n
+							found = true
+							break
+						}
+					}
+					if found {
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
 		}
-		norm, err := normalizer.Normalize(phoneRaw)
-		if err != nil {
-			invalid = append(invalid, InvalidEntry{Row: i + 1, Raw: phoneRaw, Name: name, Error: err.Error()})
+		if !found {
+			invalid = append(invalid, InvalidEntry{Row: i + 1, Raw: strings.Join(row, string(delim)), Error: "no valid phone found"})
 			continue
 		}
 		if _, exists := seen[norm]; exists {
@@ -257,7 +212,7 @@ func ParseCSV(r io.Reader) ParseResult {
 			continue
 		}
 		seen[norm] = struct{}{}
-		contacts = append(contacts, cascade.Contact{Name: name, PhoneRaw: phoneRaw, NormalizedPhone: norm})
+		contacts = append(contacts, cascade.Contact{Name: "", PhoneRaw: phoneRaw, NormalizedPhone: norm})
 	}
 	return ParseResult{Contacts: contacts, Invalid: invalid, Duplicates: dup, Total: total}
 }
@@ -391,36 +346,61 @@ func ParseXLSX(data []byte) ParseResult {
 			continue
 		}
 		total++
-		var phoneRaw, name string
-		if len(row) == 1 {
-			phoneRaw = strings.TrimSpace(row[0])
-		} else {
-			if phoneCol >= 0 && phoneCol < len(row) {
-				phoneRaw = strings.TrimSpace(row[phoneCol])
-				for idx, c := range row {
-					if idx == phoneCol {
-						continue
-					}
-					c = strings.TrimSpace(c)
-					if c != "" {
-						name = c
-						break
-					}
-				}
-			} else {
-				phoneRaw = strings.TrimSpace(row[0])
-				if len(row) > 1 {
-					name = strings.TrimSpace(row[1])
+		var phoneRaw string
+		var norm string
+		var found bool
+		if phoneCol >= 0 && phoneCol < len(row) {
+			cand := strings.TrimSpace(row[phoneCol])
+			if cand != "" {
+				if n, err := normalizer.Normalize(cand); err == nil {
+					phoneRaw = cand
+					norm = n
+					found = true
 				}
 			}
 		}
-		if phoneRaw == "" {
-			invalid = append(invalid, InvalidEntry{Row: i + 1, Raw: strings.Join(row, ","), Name: name, Error: "empty phone"})
-			continue
+		if !found {
+			for _, c := range row {
+				c = strings.TrimSpace(c)
+				if c == "" {
+					continue
+				}
+				if n, err := normalizer.Normalize(c); err == nil {
+					phoneRaw = c
+					norm = n
+					found = true
+					break
+				}
+				for _, tok := range splitRe.Split(c, -1) {
+					tok = strings.TrimSpace(tok)
+					if tok == "" {
+						continue
+					}
+					if n, err := normalizer.Normalize(tok); err == nil {
+						phoneRaw = tok
+						norm = n
+						found = true
+						break
+					}
+					for _, sub := range strings.Fields(tok) {
+						if n, err := normalizer.Normalize(sub); err == nil {
+							phoneRaw = sub
+							norm = n
+							found = true
+							break
+						}
+					}
+					if found {
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
 		}
-		norm, err := normalizer.Normalize(phoneRaw)
-		if err != nil {
-			invalid = append(invalid, InvalidEntry{Row: i + 1, Raw: phoneRaw, Name: name, Error: err.Error()})
+		if !found {
+			invalid = append(invalid, InvalidEntry{Row: i + 1, Raw: strings.Join(row, ","), Error: "no valid phone found"})
 			continue
 		}
 		if _, exists := seen[norm]; exists {
@@ -428,7 +408,7 @@ func ParseXLSX(data []byte) ParseResult {
 			continue
 		}
 		seen[norm] = struct{}{}
-		contacts = append(contacts, cascade.Contact{Name: name, PhoneRaw: phoneRaw, NormalizedPhone: norm})
+		contacts = append(contacts, cascade.Contact{Name: "", PhoneRaw: phoneRaw, NormalizedPhone: norm})
 	}
 	return ParseResult{Contacts: contacts, Invalid: invalid, Duplicates: dup, Total: total}
 }
