@@ -154,9 +154,9 @@
         <button role="tab" aria-selected="false" data-bulk-tab="file" class="tab">З файлу</button>
       </div>
       <div id="bulk-panel-paste" class="panel active" role="tabpanel">
-        <p class="hint">Встав номери в довільному форматі: через кому, крапку з комою, пробіл або новий рядок. Можна з іменами: <code class="mono">Іван +380991234567</code> або <code class="mono">0991234567, Олена 0681112233</code>. Дубльовані номери та невалідні підсвітяться.</p>
+        <p class="hint">Встав тільки номери телефонів — через кому, крапку з комою, пробіл або з нового рядка. Наприклад: <code class="mono">+380991234567</code>, <code class="mono">0991234567</code>, <code class="mono">380681112233</code>. Дублікати та невалідні підсвітяться автоматично.</p>
         <div class="field">
-          <textarea id="bulk-input" placeholder="0991234567&#10;+380991234567&#10;380681112233, Олена&#10;Іван +380991111111" rows="5"></textarea>
+          <textarea id="bulk-input" placeholder="0991234567&#10;+380991234567&#10;380681112233&#10;+380671002003, 0631234567" rows="5"></textarea>
         </div>
         <div class="actions">
           <button id="btn-bulk-parse" class="btn primary small">Розпізнати</button>
@@ -174,7 +174,7 @@
             <p id="bulk-file-name" class="small mono hidden"></p>
           </div>
         </div>
-        <p class="hint">1-й аркуш, заголовок розпізнається автоматично. Колонки: <code class="mono">Телефон | Ім'я</code> або просто список номерів. Роздільник CSV — <code>,</code> чи <code>;</code> авто-визначення.</p>
+        <p class="hint">Обробляються тільки номери телефонів. 1-й аркуш, заголовок розпізнається автоматично. Кожна клітинка/рядок — один номер. Роздільник CSV — <code>,</code> чи <code>;</code> авто-визначення.</p>
         <p id="bulk-file-error" class="error hidden" role="alert"></p>
       </div>
 
@@ -190,7 +190,7 @@
         </div>
         <div class="table-wrap">
           <table id="bulk-table" aria-label="Передперегляд контактів">
-            <thead><tr><th>#</th><th>Ім'я</th><th>Номер (як введено)</th><th>Нормалізований</th><th>Статус</th><th></th></tr></thead>
+            <thead><tr><th>#</th><th>Номер (як введено)</th><th>Нормалізований</th><th>Статус</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -200,7 +200,7 @@
       </div>
 
       <div class="bulk-send">
-        <label class="small" style="font-weight:600; display:block; margin-bottom:4px">Повідомлення — абстрактне, без прив'язки до імені/телефону · однаковий вигляд у WA і TG</label>
+        <label class="small" style="font-weight:600; display:block">Повідомлення — абстрактне, без прив'язки до імені/телефону · однаковий вигляд у WA і TG</label>
         <div class="quill-wrapper">
           <div id="bulk-quill" class="quill-editor"></div>
         </div>

@@ -73,14 +73,13 @@ function renderPreview(result) {
     }
   }
 
-  // table rows — статус зберігає check-state, в останній колонці поруч з × додаємо поштучну перевірку
+  // table rows — phones only, no names
   tbody.innerHTML = '';
   contacts.forEach((c, idx) => {
     const tr = document.createElement('tr');
     tr.dataset.idx = String(idx);
     tr.innerHTML = `
       <td>${idx + 1}</td>
-      <td title="${escapeHtml(c.Name)}">${escapeHtml(c.Name || '—')}</td>
       <td class="mono" title="${escapeHtml(c.PhoneRaw)}">${escapeHtml(c.PhoneRaw)}</td>
       <td class="mono">${escapeHtml(c.NormalizedPhone)}</td>
       <td data-check-cell><span class="badge badge-valid">✓ валідний</span></td>
@@ -94,7 +93,6 @@ function renderPreview(result) {
       tr.className = 'invalid';
       tr.innerHTML = `
         <td>${inv.Row || '—'}</td>
-        <td>${escapeHtml(inv.Name || '')}</td>
         <td class="mono">${escapeHtml(inv.Raw)}</td>
         <td class="mono">—</td>
         <td><span class="badge badge-invalid">✗ ${escapeHtml(inv.Error)}</span></td>
@@ -284,8 +282,8 @@ export function initBulkImport() {
     renderPreview({ contacts: currentContacts, invalid: currentInvalid, duplicates: 0, total: currentContacts.length + currentInvalid.length });
   });
   el('btn-bulk-edit')?.addEventListener('click', () => {
-    // put valid phones back into textarea for editing
-    const lines = currentContacts.map(c => c.Name ? `${c.Name} ${c.PhoneRaw}` : c.PhoneRaw).join('\n');
+    // put valid phones back into textarea for editing — phones only
+    const lines = currentContacts.map(c => c.PhoneRaw).join('\n');
     const input = el('bulk-input');
     if (input) { input.value = lines; }
     // switch to paste tab

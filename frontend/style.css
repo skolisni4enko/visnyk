@@ -1,5 +1,5 @@
 *{box-sizing:border-box}html{font-size:15px}html,body{height:100%}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;background:#f6f7f9;color:#171717;line-height:1.45;overflow:hidden}
-/* контейнер на всю ширину окна — окно фиксированное 960x700, без резина */
+/* container full width — fixed window 960x700, no responsive */
 #app{width:100%;max-width:none;margin:0;padding:16px 20px;display:flex;flex-direction:column;gap:12px;height:100vh;overflow-y:auto;overflow-x:hidden}
 .header.compact{text-align:center;margin:0 0 2px}
 .header h1{font-size:1.28rem;font-weight:800;margin:0;letter-spacing:-0.025em;line-height:1.2}
@@ -88,9 +88,12 @@
 .count-chip.ok{background:#ecfdf5;border-color:#a7f3d0;color:#065f46}
 .count-chip.err{background:#fef2f2;border-color:#fecaca;color:#991b1b}
 .count-chip.warn{background:#fffbeb;border-color:#fde68a;color:#92400e}
-.bulk-send{margin-top:10px;border-top:1px solid #e5e5e5;padding-top:10px}
+.bulk-send{margin-top:12px;border-top:1px solid #e5e5e5;padding-top:12px;display:flex;flex-direction:column;gap:10px}
 .bulk-send textarea{font-size:0.78rem}
-.quill-wrapper{position:relative}
+.bulk-send > label{margin-bottom:0}
+.quill-wrapper{position:relative;margin-bottom:2px}
+.bulk-send .actions{margin-top:4px;gap:8px}
+.bulk-send .hint{margin-top:2px}
 .quill-editor{border-radius:8px;overflow:hidden}
 .quill-editor .ql-toolbar.ql-snow{border:1px solid #e5e5e5;border-bottom:none;border-radius:8px 8px 0 0;background:#fafafa;padding:6px;display:flex;flex-wrap:wrap;gap:4px}
 .quill-editor .ql-container.ql-snow{border:1px solid #d4d4d4;border-top:none;border-radius:0 0 8px 8px;background:#fff;font-family:inherit;font-size:0.84rem}
@@ -117,7 +120,7 @@
 .modal-content h3{margin:0 0 6px;font-size:0.95rem}
 .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
 .footer{text-align:center;color:#737373;margin:4px 0 2px;font-size:0.68rem;letter-spacing:0.01em}
-/* connections: вкладки + колапс + футер */
+/* connections: tabs + collapse + footer */
 #connections-card.collapsible .card-head .conn-toggle{width:32px;height:32px;padding:0;display:inline-flex;align-items:center;justify-content:center;font-size:0.82rem;line-height:1;transition:transform .2s}
 #connections-card.collapsed .card-head .conn-toggle{transform:rotate(180deg)}
 .connections-body{overflow:hidden;transition:max-height .28s ease, opacity .2s ease;max-height:1200px;opacity:1}
@@ -173,7 +176,7 @@ body.sending .cascade-overlay{pointer-events:auto}
 /* cascade table also clickable */
 #cascade-table tr{cursor:pointer}
 #cascade-table tr.selected{background:#eef2ff !important;box-shadow:inset 3px 0 0 #171717}
-/* скроллбар тонкий */
+/* thin scrollbar */
 #app::-webkit-scrollbar{width:8px;height:8px}
 #app::-webkit-scrollbar-thumb{background:#d4d4d4;border-radius:8px}
 #app::-webkit-scrollbar-track{background:transparent}
