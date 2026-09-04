@@ -1,0 +1,37 @@
+name: visnyk
+arch: amd64
+platform: linux
+version: 0.1.0
+section: utils
+priority: optional
+maintainer: Visnyk Team <team@visnyk.local>
+description: |
+  Каскадна розсилка для месенджерів WA, TG, Viber.
+  Перевіряє доступність номера в месенджерах у пріоритеті WhatsApp → Telegram → Viber.
+vendor: Visnyk
+homepage: https://github.com/visnyk/visnyk
+license: MIT
+bindir: /usr/bin
+contents:
+  - src: ./build/bin/visnyk
+    dst: /usr/bin/visnyk
+    file_info:
+      mode: 0755
+  - src: ./build/debian/visnyk.desktop
+    dst: /usr/share/applications/visnyk.desktop
+    file_info:
+      mode: 0644
+  - src: ./LICENSE
+    dst: /usr/share/doc/visnyk/copyright
+    file_info:
+      mode: 0644
+overrides:
+  deb:
+    depends:
+      - libc6
+      - libgtk-3-0
+      - libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37
+    recommends:
+      - libayatana-appindicator3-1
+    suggests: []
+    compression: gzip

@@ -1,0 +1,61 @@
+# binaries & builds
+/visnyk
+/build/bin/
+!build/bin/.gitkeep
+/bin/
+
+# wails
+/wailsjs/
+frontend/wailsjs/
+/frontend/node_modules/
+/frontend/dist/
+
+# sessions & secrets — CRITICAL FOR PUBLIC REPO (do not commit)
+telegram-store/
+whatsapp-store/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+tg-session.json
+master.key
+/build/deb/
+build/bin/*.exe
+build/bin/*.deb
+build/bin/*.dmg
+build/bin/*.AppImage
+
+# logs — PII & spam (app.log contains real +380 numbers, never commit)
+app.log
+*.log
+app.log.1
+
+# env (keep .env.example tracked)
+.env
+.env.*
+!.env.example
+!.env.wails.example
+
+# ide & os
+.idea/
+.vscode/
+.DS_Store
+.pkgconfig/
+
+# python cache & temp
+__pycache__/
+*.pyc
+*.pyo
+*.tmp
+*.md5
+
+# tmp & large binaries (downloaded)
+build/windows/installer/tmp/
+build/bin/
+build/deb/
+
+# tmp
+/tmp/

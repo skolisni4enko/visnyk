@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+<title>Visnyk — каскадна розсилка</title>
+<defs><linearGradient id="g" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#0f172a"/><stop offset="100%" stop-color="#1e293b"/></linearGradient></defs>
+<rect width="512" height="512" rx="112" fill="url(#g)"/>
+<!-- V -->
+<path d="M 140 170 L 256 360 L 372 170" stroke="white" stroke-width="46" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<!-- bubbles -->
+<g>
+  <rect x="118" y="395" width="72" height="52" rx="12" fill="#25D366"/>
+  <polygon points="154,447 146,462 162,447" fill="#25D366"/>
+  <circle cx="154" cy="421" r="6" fill="white" opacity="0.9"/>
+  <rect x="206" y="395" width="72" height="52" rx="12" fill="#26A5E4"/>
+  <polygon points="242,447 234,462 250,447" fill="#26A5E4"/>
+  <circle cx="242" cy="421" r="6" fill="white" opacity="0.9"/>
+  <rect x="294" y="395" width="72" height="52" rx="12" fill="#7360F2"/>
+  <polygon points="330,447 322,462 338,447" fill="#7360F2"/>
+  <circle cx="330" cy="421" r="6" fill="white" opacity="0.9"/>
+  <!-- arrows -->
+  <path d="M 194 421 L 202 421" stroke="white" stroke-width="4" stroke-linecap="round"/>
+  <path d="M 282 421 L 290 421" stroke="white" stroke-width="4" stroke-linecap="round"/>
+</g>
+</svg>

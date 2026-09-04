@@ -1,0 +1,50 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": {
+      "ls": "allow",
+      "ls *": "allow",
+      "cat *": "allow",
+      "grep *": "allow",
+      "head *": "allow",
+      "tail *": "allow",
+      "pwd": "allow",
+      "find *": "allow",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "go vet*": "allow",
+      "go test*": "allow",
+      "go list*": "allow",
+      "go version*": "allow",
+      "gofmt *": "allow",
+      "golangci-lint*": "allow",
+      "wails dev*": "allow",
+      "go fmt*": "allow",
+      "go build*": "ask",
+      "go get*": "ask",
+      "go mod tidy*": "ask",
+      "go install*": "ask",
+      "wails build*": "ask",
+      "rm -rf *": "deny",
+      "rm -r *": "deny",
+      "sudo *": "deny",
+      "*": "ask"
+    },
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "**/vendor/**": "deny",
+      "**/node_modules/**": "deny",
+      "**/*.db": "deny",
+      "**/*.sqlite": "deny"
+    },
+    "edit": {
+      "*": "allow",
+      "*/vendor/**": "deny",
+      "**/vendor/**": "deny",
+      "**/node_modules/**": "deny"
+    }
+  }
+}

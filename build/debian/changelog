@@ -1,0 +1,6 @@
+visnyk (0.1.0-1) noble; urgency=low
+
+  * Initial release: каскадна розсилка WA -> TG -> Viber, Wails,
+    шифроване зберігання.
+
+ -- Visnyk Team <team@visnyk.local>  Thu, 03 Sep 2026 12:00:00 +0200

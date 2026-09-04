@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Нагадування — Співбесіда</title>
+  <link rel="icon" type="image/png" href="./appicon.png"/>
+  <link rel="apple-touch-icon" href="./appicon.png"/>
+  <link rel="stylesheet" href="./style.css"/>
+</head>
+<body>
+  <main id="app">
+    <header class="header compact">
+      <div style="display:flex;align-items:center;justify-content:center;gap:10px">
+        <img src="./appicon.png" alt="Visnyk" width="36" height="36" style="border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)"/>
+        <div>
+          <h1>Вісник — каскадна розсилка</h1>
+          <p class="subtitle">WhatsApp → Telegram → Viber · затримка 8–15 сек</p>
+        </div>
+      </div>
+    </header>
+
+    <section class="card compact collapsible collapsed" id="connections-card" aria-labelledby="conn-title">
+      <div class="card-head">
+        <div style="display:flex;align-items:center;gap:8px">
+          <h2 id="conn-title">Підключення</h2>
+          <span class="small">WhatsApp · Telegram · Viber</span>
+        </div>
+        <button id="btn-conn-toggle" class="btn ghost small conn-toggle" aria-expanded="false" aria-controls="connections-body" title="Згорнути/Розгорнути">▼</button>
+      </div>
+      <div id="connections-body" class="connections-body">
+        <div class="tabs conn-tabs" role="tablist" aria-label="Мессенджер">
+          <button role="tab" aria-selected="true" data-conn-tab="wa" class="tab active"><span class="conn-dot wa err"></span> WhatsApp</button>
+          <button role="tab" aria-selected="false" data-conn-tab="tg" class="tab"><span class="conn-dot tg err"></span> Telegram</button>
+          <button role="tab" aria-selected="false" data-conn-tab="viber" class="tab" disabled><span class="conn-dot viber"></span> Viber <span class="small" style="font-weight:400">скоро</span></button>
+        </div>
+        <div id="conn-panel-wa" class="panel conn-panel active" role="tabpanel">
+          <div id="wa-card" class="messenger" aria-labelledby="wa-title">
+            <div class="messenger-head">
+              <h3 id="wa-title" class="messenger-title">WhatsApp</h3>
+              <div class="head-actions">
+                <span id="wa-state" class="badge">Не підключено</span>
+                <button id="btn-logout" class="btn ghost danger small hidden" title="Видалити сесію">Вихід</button>
+              </div>
+            </div>
+            <div id="wa-not-connected">
+              <div class="tabs" role="tablist" aria-label="Спосіб підключення">
+                <button role="tab" aria-selected="true" data-tab="qr" class="tab active">QR-код</button>
+                <button role="tab" aria-selected="false" data-tab="code" class="tab">Код з телефону</button>
+              </div>
+              <div id="panel-qr" class="panel active" role="tabpanel">
+                <p class="hint" title="WhatsApp → Налаштування → Пов'язані пристрої → Прив'язати пристрій">WhatsApp → Прив'язати пристрій → QR</p>
+                <div class="actions">
+                  <button id="btn-connect" class="btn primary small">Підключити</button>
+                  <button id="btn-disconnect" class="btn ghost small">Відключити</button>
+                  <span id="qr-timer" class="small mono hidden">оновиться через 20с</span>
+                </div>
+                <div id="qr-wrap" class="qr hidden" aria-live="polite">
+                  <img id="qr-img" alt="QR-код WhatsApp" width="160" height="160"/>
+                  <p class="small">Скануйте 20с — код оновиться</p>
+                  <p id="qr-status" class="small mono"></p>
+                </div>
+              </div>
+              <div id="panel-code" class="panel" role="tabpanel" aria-hidden="true">
+                <p class="hint">Ваш номер WhatsApp → отримаєте 8-значний код → введіть: Пов'язані пристрої → Прив'язати за номером</p>
+                <div class="field">
+                  <input id="pair-phone" type="tel" placeholder="+380991234567" autocomplete="tel"/>
+                  <button id="btn-pair" class="btn primary small">Отримати код</button>
+                </div>
+                <div id="pair-result" class="pair-code hidden" aria-live="polite">
+                  <div class="code" id="pair-code">---- ----</div>
+                  <p class="small">Введіть на телефоні за 2 хв → «Підключено ✓»</p>
+                </div>
+                <p id="pair-error" class="error hidden" role="alert"></p>
+              </div>
+            </div>
+            <p id="wa-error" class="error hidden" role="alert"></p>
+          </div>
+        </div>
+        <div id="conn-panel-tg" class="panel conn-panel" role="tabpanel" aria-hidden="true">
+          <div id="tg-card" class="messenger" aria-labelledby="tg-title">
+            <div class="messenger-head">
+              <h3 id="tg-title" class="messenger-title">Telegram</h3>
+              <div class="head-actions">
+                <span id="tg-state" class="badge">Не підключено</span>
+                <button id="btn-tg-logout" class="btn ghost danger small hidden">Вихід</button>
+              </div>
+            </div>
+            <div id="tg-not-connected">
+              <p class="hint" title="my.telegram.org → API development tools (один раз)">api_id/hash: <a href="https://my.telegram.org" target="_blank">my.telegram.org</a> → API tools (1 раз)</p>
+              <div class="grid2">
+                <div class="field"><input id="tg-api-id" placeholder="api_id" inputmode="numeric"/></div>
+                <div class="field"><input id="tg-api-hash" placeholder="api_hash" /></div>
+              </div>
+              <p id="tg-config-hint" class="small ok hidden">✓ збережено</p>
+              <div class="tabs" role="tablist" aria-label="Спосіб Telegram">
+                <button role="tab" aria-selected="true" data-tg-tab="qr" class="tab active">QR-код</button>
+                <button role="tab" aria-selected="false" data-tg-tab="code" class="tab">Код</button>
+              </div>
+              <div id="tg-panel-qr" class="panel active" role="tabpanel">
+                <p class="hint" title="Telegram → Налаштування → Пристрої → Пов'язати пристрій">Telegram → Прив'язати пристрій → QR</p>
+                <div class="actions">
+                  <button id="btn-tg-qr" class="btn primary small">Показати QR</button>
+                </div>
+                <div id="tg-qr-wrap" class="qr hidden" aria-live="polite">
+                  <img id="tg-qr-img" alt="Telegram QR" width="160" height="160"/>
+                  <p class="small">Скануйте QR телефоном</p>
+                  <p id="tg-qr-status" class="small mono"></p>
+                </div>
+              </div>
+              <div id="tg-panel-code" class="panel" role="tabpanel" aria-hidden="true">
+                <div class="field">
+                  <input id="tg-phone" type="tel" placeholder="+380991234567"/>
+                  <button id="btn-tg-connect" class="btn primary small">Надіслати код</button>
+                </div>
+                <div class="field hidden" id="tg-code-wrap">
+                  <input id="tg-code" placeholder="Код з Telegram" inputmode="numeric"/>
+                  <button id="btn-tg-code" class="btn small">Підтвердити</button>
+                </div>
+              </div>
+              <div class="field hidden" id="tg-pwd-wrap">
+                <input id="tg-pwd" type="password" placeholder="Пароль 2FA"/>
+                <button id="btn-tg-pwd" class="btn small">Підтвердити</button>
+              </div>
+              <p id="tg-pwd-hint" class="small hidden" style="color:#b7791f">🔒 Потрібен 2FA-пароль</p>
+              <p id="tg-error" class="error hidden" role="alert"></p>
+              <p class="small mono" style="font-size:0.65rem">Сесія: telegram-store/session.json · Код у Telegram</p>
+            </div>
+          </div>
+        </div>
+        <div id="conn-panel-viber" class="panel conn-panel" role="tabpanel" aria-hidden="true">
+          <div class="messenger" style="align-items:center;text-align:center;padding:20px 12px">
+            <p class="small" style="font-size:0.84rem;font-weight:600">Viber — скоро</p>
+            <p class="hint">Інтеграція Viber (REST API / stub) в розробці. Поки використовуйте WhatsApp → Telegram каскад.</p>
+          </div>
+        </div>
+      </div>
+      <div class="connections-footer" aria-live="polite">
+        <span id="conn-footer-wa" class="footer-dot err"><i></i> WhatsApp: <b>Не підключено</b></span>
+        <span class="footer-sep" aria-hidden="true">·</span>
+        <span id="conn-footer-tg" class="footer-dot err"><i></i> Telegram: <b>Не підключено</b></span>
+        <span class="footer-sep" aria-hidden="true">·</span>
+        <span id="conn-footer-viber" class="footer-dot err"><i></i> Viber: <b>Не підключено</b></span>
+      </div>
+    </section>
+
+    <section class="card compact" id="bulk-card" aria-labelledby="bulk-title">
+      <div class="card-head">
+        <h2 id="bulk-title">Список для розсилки</h2>
+        <span class="small">CSV / XLSX / TXT · до 100 номерів</span>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Спосіб завантаження">
+        <button role="tab" aria-selected="true" data-bulk-tab="paste" class="tab active">Вставити пачкою</button>
+        <button role="tab" aria-selected="false" data-bulk-tab="file" class="tab">З файлу</button>
+      </div>
+      <div id="bulk-panel-paste" class="panel active" role="tabpanel">
+        <p class="hint">Встав номери в довільному форматі: через кому, крапку з комою, пробіл або новий рядок. Можна з іменами: <code class="mono">Іван +380991234567</code> або <code class="mono">0991234567, Олена 0681112233</code>. Дубльовані номери та невалідні підсвітяться.</p>
+        <div class="field">
+          <textarea id="bulk-input" placeholder="0991234567&#10;+380991234567&#10;380681112233, Олена&#10;Іван +380991111111" rows="5"></textarea>
+        </div>
+        <div class="actions">
+          <button id="btn-bulk-parse" class="btn primary small">Розпізнати</button>
+          <button id="btn-bulk-clear" class="btn ghost small">Очистити</button>
+          <span id="bulk-parse-stats" class="small mono"></span>
+        </div>
+      </div>
+      <div id="bulk-panel-file" class="panel" role="tabpanel" aria-hidden="true">
+        <div id="bulk-dropzone" class="dropzone" tabindex="0" role="button" aria-label="Перетягніть файл сюди або виберіть">
+          <div class="dropzone-inner">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="12" x2="12" y2="18"/><polyline points="9 15 12 18 15 15"/></svg>
+            <p class="small">Перетягни <strong>CSV / XLSX / TXT</strong> сюди або</p>
+            <label class="btn small ghost" for="bulk-file-input" style="cursor:pointer">Вибрати файл</label>
+            <input id="bulk-file-input" type="file" accept=".csv,.xlsx,.xls,.txt" hidden />
+            <p id="bulk-file-name" class="small mono hidden"></p>
+          </div>
+        </div>
+        <p class="hint">1-й аркуш, заголовок розпізнається автоматично. Колонки: <code class="mono">Телефон | Ім'я</code> або просто список номерів. Роздільник CSV — <code>,</code> чи <code>;</code> авто-визначення.</p>
+        <p id="bulk-file-error" class="error hidden" role="alert"></p>
+      </div>
+
+      <div id="bulk-preview-wrap" class="hidden" style="margin-top:8px">
+        <div class="preview-head">
+          <div id="bulk-counts" class="small"></div>
+          <div class="actions" style="gap:4px">
+            <button id="btn-check-contacts" class="btn primary small" title="Перевірити де є номер: WhatsApp / Telegram">Перевірити в месенджерах</button>
+            <button id="btn-hide-invalid" class="btn ghost small">Приховати невалідні</button>
+            <button id="btn-bulk-edit" class="btn ghost small">Редагувати</button>
+            <button id="btn-bulk-close" class="btn ghost small" title="Закрити передперегляд">Закрити</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="bulk-table" aria-label="Передперегляд контактів">
+            <thead><tr><th>#</th><th>Ім'я</th><th>Номер (як введено)</th><th>Нормалізований</th><th>Статус</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="bulk-check-status" class="small hidden" style="margin-top:6px"></p>
+        <p id="bulk-invalid-list" class="small err hidden"></p>
+        <p id="bulk-warning" class="small hidden" style="color:#b7791f"></p>
+      </div>
+
+      <div class="bulk-send">
+        <label class="small" style="font-weight:600; display:block; margin-bottom:4px">Повідомлення — абстрактне, без прив'язки до імені/телефону · однаковий вигляд у WA і TG</label>
+        <div class="quill-wrapper">
+          <div id="bulk-quill" class="quill-editor"></div>
+        </div>
+        <textarea id="bulk-template" class="hidden" aria-hidden="true"></textarea>
+        <div class="actions">
+          <button id="btn-bulk-send" class="btn primary small" disabled>Надіслати каскадом WA → TG</button>
+          <button id="btn-open-history" class="btn ghost small">Історія <span id="history-badge" class="badge" style="margin-left:4px">0</span></button>
+          <span id="bulk-send-progress" class="small mono"></span>
+          <button id="btn-bulk-open-logs" class="btn ghost small" title="Відкрити app.log">Відкрити логи</button>
+          <button id="btn-bulk-open-folder" class="btn ghost small" title="Відкрити папку з даними">Папка</button>
+        </div>
+        <p class="hint">Затримка 8–15 сек між повідомленнями + jitter. 30–50/год безпечно. Не закривай вікно під час розсилки. Логи: <span class="mono" id="bulk-log-path" style="font-size:0.68rem"></span></p>
+      </div>
+    </section>
+
+    <footer class="footer small">Каскад WA → TG → Viber · Затримка 8–15 сек · Не більше 50/год</footer>
+  </main>
+  <div id="logout-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-backdrop" id="modal-backdrop"></div>
+    <div class="modal-content" role="document">
+      <h3 id="modal-title">Підтвердіть вихід</h3>
+      <p id="modal-msg" class="small">Ви впевнені, що хочете вийти? Сесію буде видалено.</p>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn small">Скасувати</button>
+        <button id="modal-confirm" class="btn ghost danger small">Вийти</button>
+      </div>
+    </div>
+  </div>
+  <div id="history-clear-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="history-clear-title">
+    <div class="modal-backdrop" id="history-clear-backdrop"></div>
+    <div class="modal-content" role="document">
+      <h3 id="history-clear-title">Очистити історію?</h3>
+      <p id="history-clear-msg" class="small">Буде видалено <b id="history-clear-count">0</b> записів історії. Дію неможливо скасувати. Логи та налаштування (сесії WA/TG) залишаться.</p>
+      <p class="small" style="color:#991b1b;margin-top:6px">⚠️ Видаляється тільки таблиця історії, не вся база. Для повного очищення використовуйте «Очистити все» в налаштуваннях.</p>
+      <div class="modal-actions">
+        <button id="history-clear-cancel" class="btn small">Скасувати</button>
+        <button id="history-clear-confirm" class="btn danger small">Очистити</button>
+      </div>
+    </div>
+  </div>
+  <div id="history-delete-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="history-delete-title">
+    <div class="modal-backdrop" id="history-delete-backdrop"></div>
+    <div class="modal-content" role="document">
+      <h3 id="history-delete-title">Видалити запис?</h3>
+      <p id="history-delete-msg" class="small">Видалити <b id="history-delete-phone"></b> <span id="history-delete-date" class="mono"></span> ? Дію неможливо скасувати.</p>
+      <div class="modal-actions">
+        <button id="history-delete-cancel" class="btn small">Скасувати</button>
+        <button id="history-delete-confirm" class="btn danger small">Видалити</button>
+      </div>
+    </div>
+  </div>
+  <!-- History overlay -->
+  <div id="history-overlay" class="history-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="history-overlay-title">
+    <div id="history-backdrop" class="history-backdrop"></div>
+    <div class="history-sheet" role="document">
+      <div class="history-head">
+        <div>
+          <h3 id="history-overlay-title" class="history-title">Історія відправлень</h3>
+          <span id="history-meta" class="small mono"></span>
+        </div>
+        <button id="btn-history-overlay-close" class="btn ghost small" aria-label="Закрити">✕</button>
+      </div>
+      <div class="history-filters" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:4px 0">
+        <label class="small" style="display:flex;align-items:center;gap:4px">Канал:
+          <select id="history-filter-channel" class="small" style="border:1px solid #d4d4d4;border-radius:6px;padding:4px 6px;background:#fff">
+            <option value="all">Всі</option>
+            <option value="whatsapp">WhatsApp</option>
+            <option value="telegram">Telegram</option>
+            <option value="viber">Viber</option>
+            <option value="none">none</option>
+          </select>
+        </label>
+        <label class="small" style="display:flex;align-items:center;gap:4px">Статус:
+          <select id="history-filter-status" class="small" style="border:1px solid #d4d4d4;border-radius:6px;padding:4px 6px;background:#fff">
+            <option value="all">Всі</option>
+            <option value="sent">sent</option>
+            <option value="failed">failed</option>
+            <option value="skipped">skipped</option>
+          </select>
+        </label>
+        <button id="btn-history-filter-reset" class="btn ghost small" style="margin-left:auto">Скинути</button>
+      </div>
+      <p class="hint" style="margin:2px 0 6px">Клік по рядку — копіює номер (як введено). Нові зверху, групи Сьогодні / Вчора.</p>
+      <div class="table-wrap history-wrap">
+        <table id="history-table" aria-label="Історія відправлень">
+          <thead><tr><th>#</th><th>Дата / час</th><th>Ім'я</th><th>Телефон</th><th>Канал</th><th>Статус</th><th>Помилка</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="history-empty" class="small hidden" style="text-align:center;padding:10px 0">Немає відправлень — історія з'явиться після першої розсилки</p>
+      <div id="history-pagination" class="pagination hidden" aria-label="Пагінація історії">
+        <button id="btn-history-prev" class="btn ghost small" disabled>‹ Назад</button>
+        <span id="history-page-info" class="small mono">1 / 1</span>
+        <button id="btn-history-next" class="btn ghost small" disabled>Вперед ›</button>
+        <span class="small" style="margin-left:8px">Всього: <b id="history-total">0</b></span>
+      </div>
+      <p id="history-count" class="small mono" style="margin-top:4px"></p>
+      <div class="history-actions">
+        <button id="btn-history-refresh" class="btn ghost small">Оновити</button>
+        <button id="btn-history-clear" class="btn ghost danger small">Очистити</button>
+        <div style="flex:1"></div>
+        <button id="btn-history-close" class="btn primary small">Закрити</button>
+      </div>
+      <div id="history-toast" class="copy-toast hidden" role="status" aria-live="polite">Скопійовано в буфер</div>
+    </div>
+  </div>
+
+  <!-- Cascade progress overlay — blocks main window during send -->
+  <div id="cascade-overlay" class="cascade-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="cascade-title" aria-describedby="cascade-current">
+    <div class="cascade-sheet" role="document">
+      <div class="cascade-head">
+        <div>
+          <h3 id="cascade-title" class="cascade-title">Розсилка</h3>
+          <p id="cascade-status" class="small" style="margin:2px 0 0;font-weight:600">Підготовка...</p>
+          <p id="cascade-current" class="small mono" style="margin:2px 0 0;min-height:1.2em"></p>
+        </div>
+        <div class="cascade-head-meta">
+          <span id="cascade-pct" class="mono" style="font-weight:700;font-size:0.82rem">0%</span>
+          <span id="cascade-eta" class="small mono"></span>
+        </div>
+      </div>
+      <div class="cascade-bar" aria-hidden="true"><i id="cascade-bar-fill" style="width:0%"></i></div>
+      <div class="table-wrap" style="max-height:240px;margin-top:10px">
+        <table id="cascade-table" aria-label="Хід розсилки">
+          <thead><tr><th>#</th><th>Ім'я</th><th>Телефон</th><th>Канал</th><th>Статус</th><th>Помилка</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint" style="margin:6px 0 0">Вікно заблоковано до завершення. Не закривай програму. Логи пишуться в <span class="mono" id="cascade-log-path" style="font-size:0.68rem"></span></p>
+      <div class="cascade-actions">
+        <button id="btn-cascade-cancel" class="btn ghost danger small">Скасувати</button>
+        <button id="btn-cascade-close" class="btn primary small hidden">Закрити</button>
+        <div style="flex:1"></div>
+        <button id="btn-open-logs" class="btn ghost small">Відкрити логи</button>
+        <button id="btn-open-folder" class="btn ghost small">Папка</button>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "name": "visnyk",
+  "outputfilename": "visnyk",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Visnyk Team",
+    "email": "team@visnyk.local"
+  },
+  "info": {
+    "companyName": "Visnyk",
+    "productName": "Visnyk",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright (c) 2026 Visnyk Team",
+    "comments": "Cascade broadcast WA -> TG -> Viber"
+  },
+  "assetdir": "./frontend/dist",
+  "reloaddirs": "./frontend/dist",
+  "frontend:dir": "./frontend"
+}
