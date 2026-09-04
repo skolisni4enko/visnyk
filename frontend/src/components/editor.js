@@ -1,4 +1,4 @@
-// Нормальный редактор — Quill 2 вместо самописного
+// Rich editor — Quill 2 instead of custom implementation
 import Quill from 'quill';
 import 'quill/dist/quill.snow.css';
 

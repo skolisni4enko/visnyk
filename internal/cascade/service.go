@@ -90,7 +90,7 @@ func (s *Service) SendBatchWithProgress(ctx context.Context, contacts []Contact,
 }
 
 func (s *Service) sendOne(_ context.Context, c Contact, tmpl string) SendResult {
-	msg := tmpl // абстрактное сообщение — без подстановки имени/телефона
+	msg := tmpl // abstract message — no name/phone substitution
 	channels := []Messenger{s.whatsapp, s.telegram, s.viber}
 	for _, m := range channels {
 		if m == nil {

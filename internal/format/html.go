@@ -60,7 +60,7 @@ func HTMLToWhatsApp(in string) string {
 				b.WriteString("\n")
 				return
 			case "strong", "b":
-				// Не обгортати URL в markdown — WhatsApp не кликает *https://* чи _https://_
+				// Do not wrap URL in markdown — WhatsApp will not make *https://* or _https://_ clickable
 				if subtreeHasLink(n) {
 					for c := n.FirstChild; c != nil; c = c.NextSibling {
 						walk(c)
@@ -144,11 +144,11 @@ func HTMLToWhatsApp(in string) string {
 				}
 				text := strings.TrimSpace(inner.String())
 				href = strings.TrimSpace(href)
-				// нормализованное сравнение для dedup (кейс meet.google.com с хвостовым / и &amp;)
+				// normalized comparison for dedup (case meet.google.com with trailing / and &amp;)
 				if text == "" && href != "" {
 					b.WriteString(href)
 				} else if href == "" || urlsEqual(text, href) {
-					// текст уже является URL — не дублировать
+					// text is already a URL — do not duplicate
 					if href != "" && text != "" && urlsEqual(text, href) {
 						b.WriteString(href)
 					} else {
@@ -198,16 +198,16 @@ func postProcessWhatsApp(s string) string {
 	if s == "" {
 		return s
 	}
-	// 1) Знімаємо markdown-обгортку що ламає клікабельність: *https://*, _https://_, ~https://~, `https://`
-	//    Робимо ДО вставки пробілу, інакше "_https://..." -> "_ https://..." не матчиться.
+	// 1) Remove markdown wrapper that breaks clickability: *https://*, _https://_, ~https://~, `https://`
+	//    Do it BEFORE inserting space, otherwise "_https://..." -> "_ https://..." will not match.
 	s = regexp.MustCompile(`\*+(https?://[^\s*]+)\*+`).ReplaceAllString(s, "$1")
 	s = regexp.MustCompile(`_+(https?://[^\s_]+)_+`).ReplaceAllString(s, "$1")
 	s = regexp.MustCompile(`~+(https?://[^\s~]+)~+`).ReplaceAllString(s, "$1")
 	s = regexp.MustCompile("`+(https?://[^\\s`]+)`+").ReplaceAllString(s, "$1")
-	// 2) Гарантуємо пробіл перед URL якщо його з'їв емодзі/символ типу "🔗https://"
+	// 2) Ensure space before URL if it was eaten by emoji/symbol like "🔗https://"
 	s = regexp.MustCompile(`([^\s\n])(https?://)`).ReplaceAllString(s, "$1 $2")
-	// 3) Дублікат підряд "URL URL" -> залишити один (страхує якщо dedup порівняння не спрацювало)
-	//    RE2 не підтримує \1, робимо ручний dedup
+	// 3) Consecutive duplicate "URL URL" -> keep one (guards if dedup comparison failed)
+	//    RE2 does not support \1, do manual dedup
 	s = dedupConsecutiveURLs(s)
 	s = strings.TrimSpace(s)
 	return s

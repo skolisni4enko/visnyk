@@ -1,4 +1,4 @@
-// History table — server pagination + grouping by date (Сьогодні/Вчора/Дата)
+// History table — server pagination + grouping by date (Today/Yesterday/Date)
 import { isWailsAvailable } from '../lib/wails.js';
 import { createLogoutModal } from './modal.js';
 

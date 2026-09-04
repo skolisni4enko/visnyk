@@ -419,7 +419,7 @@ func toWhatsAppMessage(in string) string {
 	if len(in) == 0 {
 		return in
 	}
-	// HTMLToWhatsApp уже вміє і plain (postProcess пробілів/дублів), тому завжди через нього
+	// HTMLToWhatsApp already handles plain text (postProcess spaces/dedup), so always route through it
 	return format.HTMLToWhatsApp(in)
 }
 
@@ -440,7 +440,7 @@ func (s *Service) Disconnect() {
 func (s *Service) DBPath() string { return s.dbPath }
 
 // GetPhone returns the linked WhatsApp account phone (JID user part) if logged in, empty otherwise.
-// Зберігається в whatsapp-store/whatsapp.db і видаляється при Logout (зміна номера/акаунту).
+// Stored in whatsapp-store/whatsapp.db and removed on Logout (account/phone change).
 func (s *Service) GetPhone() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

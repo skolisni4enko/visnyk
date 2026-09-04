@@ -15,7 +15,7 @@ func TestHTMLToWhatsApp(t *testing.T) {
 		{`plain text`, "plain text"},
 		{`<p>emoji 😊 <strong>bold 😂</strong></p>`, "emoji 😊 *bold 😂*"},
 		{`<ul><li>one</li><li>two</li></ul>`, "• one\n• two"},
-		// регрес: баг користувача — meet.google.com дублювався і ставав неклікабельним
+		// regression: user bug — meet.google.com was duplicated and became non-clickable
 		{`<p>🔗 <a href="https://meet.google.com/gqs-gdnd-ayy">https://meet.google.com/gqs-gdnd-ayy</a></p>`, "🔗 https://meet.google.com/gqs-gdnd-ayy"},
 		{`<p>🔗https://meet.google.com/gqs-gdnd-ayy</p>`, "🔗 https://meet.google.com/gqs-gdnd-ayy"},
 		{`🔗https://meet.google.com/gqs-gdnd-ayy`, "🔗 https://meet.google.com/gqs-gdnd-ayy"},
@@ -23,10 +23,10 @@ func TestHTMLToWhatsApp(t *testing.T) {
 		{`<p><strong><a href="https://meet.google.com/gqs-gdnd-ayy">https://meet.google.com/gqs-gdnd-ayy</a></strong></p>`, "https://meet.google.com/gqs-gdnd-ayy"},
 		{`<p><em>https://example.com</em></p>`, "https://example.com"},
 		{`<p><strong>https://example.com</strong></p>`, "https://example.com"},
-		// dedup з хвостовим слешем
+		// dedup with trailing slash
 		{`<p><a href="https://example.com/">https://example.com</a></p>`, "https://example.com/"},
 		{`🔔 Нагадування!`, "🔔 Нагадування!"},
-		// повний кейс користувача
+		// full user case
 		{`<p>🔔 Нагадування!</p><p>Просимо приєднатися:<br>🔗 <a href="https://meet.google.com/gqs-gdnd-ayy">https://meet.google.com/gqs-gdnd-ayy</a></p><p>📞 +380 50 111 22 33</p>`, "🔔 Нагадування!\n\nПросимо приєднатися:\n🔗 https://meet.google.com/gqs-gdnd-ayy\n\n📞 +380 50 111 22 33"},
 	}
 	for i, c := range cases {
@@ -38,7 +38,7 @@ func TestHTMLToWhatsApp(t *testing.T) {
 }
 
 func TestHTMLToWhatsApp_URLInsideFormatting(t *testing.T) {
-	// URL не повинен обгортатися в * _ ~ ` — інакше WhatsApp не клікає
+	// URL must not be wrapped in * _ ~ ` — otherwise WhatsApp will not make it clickable
 	cases := []string{
 		`<p><em>курсив <a href="https://example.com">линк</a></em></p>`,
 		`<p><strong>жирный <a href="https://example.com">https://example.com</a> конец</strong></p>`,
@@ -58,7 +58,7 @@ func TestHTMLToWhatsApp_URLInsideFormatting(t *testing.T) {
 }
 
 func containsWrappedURL(s string) bool {
-	// шукаємо *https://, _https://, ~https://, `https://
+	// look for *https://, _https://, ~https://, `https://
 	for _, prefix := range []string{"*https://", "_https://", "~https://", "`https://"} {
 		if contains(s, prefix) {
 			return true

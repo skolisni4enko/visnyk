@@ -1,4 +1,4 @@
-// Connections card: верхні вкладки WA/TG/Viber + колапс + футер текст+крапка (дубль в табі і внизу)
+// Connections card: top tabs WA/TG/Viber + collapse + footer text + dot (duplicate in tab and bottom)
 const LS_KEY = 'visnyk:conn-collapsed';
 const TAB_LS_KEY = 'visnyk:conn-tab';
 
@@ -51,7 +51,7 @@ export function initConnectionsCollapse() {
     btn.textContent = collapsed ? '▼' : '▲';
     btn.title = collapsed ? 'Розгорнути' : 'Згорнути';
   }
-  let collapsed = true; // default згорнутий (вимога)
+  let collapsed = true; // default collapsed (requirement)
   try {
     const saved = localStorage.getItem(LS_KEY);
     if (saved !== null) collapsed = saved === '1';

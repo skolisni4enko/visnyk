@@ -108,7 +108,7 @@ func resolveConfigPath() string {
 }
 
 // tgConfig persists api_id/hash + phone so user enters once and can switch account.
-// phone зберігається для відображення поточного акаунту і видаляється при Logout/зміні номера.
+// phone is stored to display current account and is removed on Logout/account change.
 type tgConfig struct {
 	AppID   int    `json:"app_id"`
 	AppHash string `json:"app_hash"`
