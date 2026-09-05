@@ -362,74 +362,99 @@ initHistory();
   } catch {}
 })();
 
-// Bulk cascade send — now via overlay + async events + file logging
+// Bulk cascade + direct send — via overlay + async events + file logging
 const btnBulkSend = document.getElementById('btn-bulk-send');
-if (btnBulkSend) {
-  btnBulkSend.addEventListener('click', async () => {
-    const contacts = getBulkContacts();
-    const template = getBulkTemplate();
-    const progress = document.getElementById('bulk-send-progress');
-    if (!contacts || contacts.length === 0) {
-      if (progress) { progress.textContent = 'Немає валідних контактів'; progress.className = 'small err'; }
-      return;
-    }
-    if (!template.trim()) {
-      if (progress) { progress.textContent = 'Введи шаблон повідомлення'; progress.className = 'small err'; }
-      return;
-    }
-    if (!isWailsAvailable()) { if (progress) progress.textContent = 'Запусти через Wails для відправки'; return; }
-    try {
+const btnBulkSendWa = document.getElementById('btn-bulk-send-wa');
+const btnBulkSendTg = document.getElementById('btn-bulk-send-tg');
+const bulkSendBtns = [btnBulkSend, btnBulkSendWa, btnBulkSendTg].filter(Boolean);
+function setBulkBtnsDisabled(disabled) { bulkSendBtns.forEach(b => { if (b) b.disabled = disabled; }); }
+
+async function startBulkSend(mode) {
+  const contacts = getBulkContacts();
+  const template = getBulkTemplate();
+  const progress = document.getElementById('bulk-send-progress');
+  if (!contacts || contacts.length === 0) {
+    if (progress) { progress.textContent = 'Немає валідних контактів'; progress.className = 'small err'; }
+    return;
+  }
+  if (!template.trim()) {
+    if (progress) { progress.textContent = 'Введи шаблон повідомлення'; progress.className = 'small err'; }
+    return;
+  }
+  if (!isWailsAvailable()) { if (progress) progress.textContent = 'Запусти через Wails для відправки'; return; }
+  // pre-check connection per mode
+  try {
+    if (mode === 'whatsapp') {
+      const waOk = await window.go.ui.App.IsWhatsAppLoggedIn();
+      if (!waOk) { if (progress) { progress.textContent = '⚠️ Підключи WhatsApp перед відправкою в WhatsApp'; progress.className = 'small err'; } return; }
+    } else if (mode === 'telegram') {
+      const tgOk = await window.go.ui.App.IsTelegramLoggedIn();
+      if (!tgOk) { if (progress) { progress.textContent = '⚠️ Підключи Telegram перед відправкою в Telegram'; progress.className = 'small err'; } return; }
+    } else {
       const waOk = await window.go.ui.App.IsWhatsAppLoggedIn();
       const tgOk = await window.go.ui.App.IsTelegramLoggedIn();
       if (!waOk && !tgOk) {
         if (progress) { progress.textContent = '⚠️ Підключи WhatsApp або Telegram перед розсилкою'; progress.className = 'small err'; }
         return;
       }
-    } catch {}
-    // check already running
-    try {
-      const running = await window.go.ui.App.IsCascadeRunning();
-      if (running) { if (progress) { progress.textContent = 'Розсилка вже виконується'; progress.className = 'small err'; } return; }
-    } catch {}
-    // show blocking overlay (single source of truth)
-    showOverlay(contacts.length);
-    if (progress) { progress.textContent = `Відправляємо 0/${contacts.length}...`; progress.className = 'small'; }
-    btnBulkSend.disabled = true;
-    // also log start via LogApp for visibility
-    try { await window.go.ui.App.LogApp('INFO', 'ui', `ui start batch total=${contacts.length}`); } catch {}
-    try {
-      const errStr = await window.go.ui.App.StartCascadeBatch(contacts, template);
-      if (errStr && errStr.length > 0) {
-        if (progress) { progress.textContent = 'Помилка старту: ' + errStr; progress.className = 'small err'; }
-        // hide overlay on start failure
-        const ov = document.getElementById('cascade-overlay');
-        if (ov) ov.classList.add('hidden');
-        document.body.classList.remove('sending');
-        btnBulkSend.disabled = false;
-        return;
-      }
-      // success — progress will be via events (cascade:progress / cascade:done in progress.js)
-      // re-enable button only after done event — but allow early re-enable if needed for cancel flow
-      // poll for finish to re-enable button (progress.js will also handle)
-      const waitDone = () => {
-        const check = async () => {
-          try {
-            const running = await window.go.ui.App.IsCascadeRunning();
-            if (!running) { btnBulkSend.disabled = false; return; }
-          } catch { btnBulkSend.disabled = false; return; }
-          setTimeout(check, 800);
-        };
-        setTimeout(check, 1000);
-      };
-      waitDone();
-    } catch (e) {
-      if (progress) { progress.textContent = 'Помилка: ' + String(e); progress.className = 'small err'; }
+    }
+  } catch {}
+  try {
+    const running = await window.go.ui.App.IsCascadeRunning();
+    if (running) { if (progress) { progress.textContent = 'Розсилка вже виконується'; progress.className = 'small err'; } return; }
+  } catch {}
+  showOverlay(contacts.length, mode);
+  if (progress) { progress.textContent = `Відправляємо 0/${contacts.length}...`; progress.className = 'small'; }
+  setBulkBtnsDisabled(true);
+  try { await window.go.ui.App.LogApp('INFO', 'ui', `ui start batch mode=${mode} total=${contacts.length}`); } catch {}
+  try {
+    let errStr = '';
+    if (mode === 'whatsapp') errStr = await window.go.ui.App.StartWhatsAppBatch(contacts, template);
+    else if (mode === 'telegram') errStr = await window.go.ui.App.StartTelegramBatch(contacts, template);
+    else errStr = await window.go.ui.App.StartCascadeBatch(contacts, template);
+    if (errStr && errStr.length > 0) {
+      if (progress) { progress.textContent = 'Помилка старту: ' + errStr; progress.className = 'small err'; }
       const ov = document.getElementById('cascade-overlay');
       if (ov) ov.classList.add('hidden');
       document.body.classList.remove('sending');
-      btnBulkSend.disabled = false;
+      setBulkBtnsDisabled(false);
+      // re-enable based on valid contacts
+      const hasValid = getBulkContacts().length > 0;
+      if (!hasValid) setBulkBtnsDisabled(true);
+      else bulkSendBtns.forEach(b => { if (b) b.disabled = false; });
+      return;
     }
-  });
+    const waitDone = () => {
+      const check = async () => {
+        try {
+          const running = await window.go.ui.App.IsCascadeRunning();
+          if (!running) {
+            const hasValid = getBulkContacts().length > 0;
+            bulkSendBtns.forEach(b => { if (b) b.disabled = !hasValid; });
+            return;
+          }
+        } catch {
+          const hasValid = getBulkContacts().length > 0;
+          bulkSendBtns.forEach(b => { if (b) b.disabled = !hasValid; });
+          return;
+        }
+        setTimeout(check, 800);
+      };
+      setTimeout(check, 1000);
+    };
+    waitDone();
+  } catch (e) {
+    if (progress) { progress.textContent = 'Помилка: ' + String(e); progress.className = 'small err'; }
+    const ov = document.getElementById('cascade-overlay');
+    if (ov) ov.classList.add('hidden');
+    document.body.classList.remove('sending');
+    const hasValid = getBulkContacts().length > 0;
+    bulkSendBtns.forEach(b => { if (b) b.disabled = !hasValid; });
+  }
 }
+
+if (btnBulkSend) btnBulkSend.addEventListener('click', () => startBulkSend('cascade'));
+if (btnBulkSendWa) btnBulkSendWa.addEventListener('click', () => startBulkSend('whatsapp'));
+if (btnBulkSendTg) btnBulkSendTg.addEventListener('click', () => startBulkSend('telegram'));
 
 

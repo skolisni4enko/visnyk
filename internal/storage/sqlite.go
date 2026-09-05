@@ -217,8 +217,23 @@ func (s *Store) CountHistory() (int, error) {
 	return n, err
 }
 
-// ListHistoryFiltered returns filtered history with pagination.
+// escapeLike escapes % _ and \ for SQLite LIKE ESCAPE '\'
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
+// ListHistoryFiltered returns filtered history with pagination and search.
+// search is matched (case-insensitive) against phone, normalized, name, channel, status, error, message_preview.
+// Empty search disables the filter. Search is trimmed and limited to 100 chars.
 func (s *Store) ListHistoryFiltered(limit, offset int, channel, status string) ([]HistoryEntry, error) {
+	return s.ListHistoryFilteredSearch(limit, offset, channel, status, "")
+}
+
+// ListHistoryFilteredSearch is like ListHistoryFiltered but with free-text search.
+func (s *Store) ListHistoryFilteredSearch(limit, offset int, channel, status, search string) ([]HistoryEntry, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -227,6 +242,10 @@ func (s *Store) ListHistoryFiltered(limit, offset int, channel, status string) (
 	}
 	if offset < 0 {
 		offset = 0
+	}
+	search = strings.TrimSpace(search)
+	if len(search) > 100 {
+		search = search[:100]
 	}
 	q := `SELECT id,phone,normalized,COALESCE(name,''),channel,status,COALESCE(error,''),sent_at,COALESCE(message_preview,'') FROM history WHERE 1=1`
 	args := []interface{}{}
@@ -237,6 +256,13 @@ func (s *Store) ListHistoryFiltered(limit, offset int, channel, status string) (
 	if status != "" && status != "all" {
 		q += ` AND status = ?`
 		args = append(args, status)
+	}
+	if search != "" {
+		esc := escapeLike(search)
+		like := "%" + esc + "%"
+		// Best practice: search all user-visible fields, case-insensitive via COLLATE NOCASE
+		q += ` AND (phone LIKE ? ESCAPE '\' OR normalized LIKE ? ESCAPE '\' OR COALESCE(name,'') LIKE ? ESCAPE '\' COLLATE NOCASE OR channel LIKE ? ESCAPE '\' COLLATE NOCASE OR status LIKE ? ESCAPE '\' COLLATE NOCASE OR COALESCE(error,'') LIKE ? ESCAPE '\' COLLATE NOCASE OR COALESCE(message_preview,'') LIKE ? ESCAPE '\' COLLATE NOCASE)`
+		args = append(args, like, like, like, like, like, like, like)
 	}
 	q += ` ORDER BY sent_at DESC, id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
@@ -260,6 +286,15 @@ func (s *Store) ListHistoryFiltered(limit, offset int, channel, status string) (
 
 // CountHistoryFiltered returns count for filters.
 func (s *Store) CountHistoryFiltered(channel, status string) (int, error) {
+	return s.CountHistoryFilteredSearch(channel, status, "")
+}
+
+// CountHistoryFilteredSearch returns count for filters with search.
+func (s *Store) CountHistoryFilteredSearch(channel, status, search string) (int, error) {
+	search = strings.TrimSpace(search)
+	if len(search) > 100 {
+		search = search[:100]
+	}
 	q := `SELECT COUNT(*) FROM history WHERE 1=1`
 	args := []interface{}{}
 	if channel != "" && channel != "all" {
@@ -269,6 +304,12 @@ func (s *Store) CountHistoryFiltered(channel, status string) (int, error) {
 	if status != "" && status != "all" {
 		q += ` AND status = ?`
 		args = append(args, status)
+	}
+	if search != "" {
+		esc := escapeLike(search)
+		like := "%" + esc + "%"
+		q += ` AND (phone LIKE ? ESCAPE '\' OR normalized LIKE ? ESCAPE '\' OR COALESCE(name,'') LIKE ? ESCAPE '\' COLLATE NOCASE OR channel LIKE ? ESCAPE '\' COLLATE NOCASE OR status LIKE ? ESCAPE '\' COLLATE NOCASE OR COALESCE(error,'') LIKE ? ESCAPE '\' COLLATE NOCASE OR COALESCE(message_preview,'') LIKE ? ESCAPE '\' COLLATE NOCASE)`
+		args = append(args, like, like, like, like, like, like, like)
 	}
 	var n int
 	err := s.db.QueryRow(q, args...).Scan(&n)

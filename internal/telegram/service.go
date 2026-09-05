@@ -795,7 +795,10 @@ func (s *Service) IsAvailable(phone string) (bool, error) {
 	return s.IsOnTelegram(phone)
 }
 
-// IsOnTelegram checks via ContactsImportContacts
+// IsOnTelegram checks via ContactsImportContacts without polluting address book.
+// It imports with phone as temporary name and immediately deletes the imported contact
+// if it was newly created, so the book is not cluttered and the chat shows the
+// user's real Telegram profile name (FirstName/LastName from User object).
 func (s *Service) IsOnTelegram(phone string) (bool, error) {
 	s.mu.Lock()
 	client := s.client
@@ -810,12 +813,23 @@ func (s *Service) IsOnTelegram(phone string) (bool, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// Use phone as temporary FirstName to avoid uniform "Test" in the book.
+	// If import creates a new contact we delete it right away.
+	tmpName := phone
+	if len(tmpName) > 20 {
+		tmpName = tmpName[len(tmpName)-10:]
+	}
 	contacts := []tg.InputPhoneContact{
-		{Phone: phone, FirstName: "Test", LastName: ""},
+		{Phone: phone, FirstName: tmpName, LastName: ""},
 	}
 	res, err := client.API().ContactsImportContacts(ctx, contacts)
 	if err != nil {
 		return false, fmt.Errorf("ImportContacts: %w", err)
+	}
+	// schedule cleanup of newly imported contacts (do not keep Test-like entries)
+	if len(res.Imported) > 0 {
+		// delete only the contacts we just created — keeps book clean
+		go s.cleanupImportedContacts(phone, res)
 	}
 	for _, u := range res.Users {
 		if _, ok := u.(*tg.User); ok {
@@ -825,7 +839,49 @@ func (s *Service) IsOnTelegram(phone string) (bool, error) {
 	return false, nil
 }
 
-// Send sends text to phone
+// cleanupImportedContacts deletes contacts that were just imported via ContactsImportContacts.
+// It is called asynchronously after import to not block the check/send flow.
+// Only deletes contacts that appear in res.Imported (newly created), preserving pre-existing ones.
+func (s *Service) cleanupImportedContacts(phone string, res *tg.ContactsImportedContacts) {
+	if res == nil || len(res.Imported) == 0 || len(res.Users) == 0 {
+		return
+	}
+	// Build map of newly imported User IDs from Imported entries
+	importedIDs := make(map[int64]bool, len(res.Imported))
+	for _, ic := range res.Imported {
+		importedIDs[ic.UserID] = true
+	}
+	var toDelete []tg.InputUserClass
+	for _, u := range res.Users {
+		if usr, ok := u.(*tg.User); ok {
+			if importedIDs[usr.ID] {
+				toDelete = append(toDelete, &tg.InputUser{UserID: usr.ID, AccessHash: usr.AccessHash})
+			}
+		}
+	}
+	if len(toDelete) == 0 {
+		return
+	}
+	// Use background context with timeout for delete, independent from import ctx
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	client := s.client
+	connected := s.connected && s.loggedIn
+	s.mu.Unlock()
+	if !connected || client == nil {
+		return
+	}
+	if _, err := client.API().ContactsDeleteContacts(ctx, toDelete); err != nil {
+		fmt.Printf("[telegram] cleanup delete %s -> %v (users=%d)\n", phone, err, len(toDelete))
+	} else {
+		fmt.Printf("[telegram] cleanup delete %s ok (users=%d)\n", phone, len(toDelete))
+	}
+}
+
+// Send sends text to phone without keeping the contact in the book.
+// After import we delete the newly created contact (if any) so the dialog
+// shows the user's real profile name instead of the temporary import name.
 func (s *Service) Send(phone, msgText string) error {
 	s.mu.Lock()
 	client := s.client
@@ -840,7 +896,11 @@ func (s *Service) Send(phone, msgText string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	contacts := []tg.InputPhoneContact{{Phone: phone, FirstName: "Test", LastName: ""}}
+	tmpName := phone
+	if len(tmpName) > 20 {
+		tmpName = tmpName[len(tmpName)-10:]
+	}
+	contacts := []tg.InputPhoneContact{{Phone: phone, FirstName: tmpName, LastName: ""}}
 	res, err := client.API().ContactsImportContacts(ctx, contacts)
 	if err != nil {
 		return fmt.Errorf("import: %w", err)
@@ -858,10 +918,17 @@ func (s *Service) Send(phone, msgText string) error {
 	if user == nil {
 		return fmt.Errorf("user not found")
 	}
+	// remember if this user was newly imported — we will delete after send
+	newlyImported := false
+	for _, ic := range res.Imported {
+		if ic.UserID == user.ID {
+			newlyImported = true
+			break
+		}
+	}
 	inputPeer := &tg.InputPeerUser{UserID: user.ID, AccessHash: user.AccessHash}
 	sender := tgmessage.NewSender(client.API())
 	if format.IsHTML(msgText) {
-		// Normalize HTML to Telegram-compatible subset for identical rendering with WhatsApp
 		htmlStr := format.HTMLToTelegram(msgText)
 		_, err = sender.To(inputPeer).StyledText(ctx, html.String(nil, htmlStr))
 	} else {
@@ -869,6 +936,25 @@ func (s *Service) Send(phone, msgText string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("send: %w", err)
+	}
+	// cleanup: delete the temporary contact if we just created it
+	if newlyImported {
+		go func(uid int64, hash int64) {
+			cctx, ccancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer ccancel()
+			s.mu.Lock()
+			cl := s.client
+			ok := s.connected && s.loggedIn
+			s.mu.Unlock()
+			if !ok || cl == nil {
+				return
+			}
+			if _, derr := cl.API().ContactsDeleteContacts(cctx, []tg.InputUserClass{&tg.InputUser{UserID: uid, AccessHash: hash}}); derr != nil {
+				fmt.Printf("[telegram] send cleanup delete %s -> %v\n", phone, derr)
+			} else {
+				fmt.Printf("[telegram] send cleanup delete %s ok\n", phone)
+			}
+		}(user.ID, user.AccessHash)
 	}
 	return nil
 }

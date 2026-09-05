@@ -139,30 +139,53 @@ function handleProgress(p) {
   appendRow(idx, name, phone, channel, status, err);
 }
 
+let currentMode = 'cascade';
+function modeTitle(mode) {
+  if (mode === 'whatsapp' || mode === 'whatsapp-direct') return 'Розсилка — тільки WhatsApp';
+  if (mode === 'telegram' || mode === 'telegram-direct') return 'Розсилка — тільки Telegram';
+  return 'Розсилка — Каскад WA → TG';
+}
+function modeChannelLabel(ch) {
+  if (ch === 'whatsapp') return 'WhatsApp';
+  if (ch === 'telegram') return 'Telegram';
+  return ch || '';
+}
+
 function handleDone(data) {
-  // data: {results, cancelled, total}
+  // data: {results, cancelled, total, channel, mode}
   isRunning = false;
   const results = (data && (data.results || data.Results)) || [];
   const cancelled = data && (data.cancelled || data.Cancelled);
+  const ch = data && (data.channel || data.Channel) || '';
+  const mode = (data && (data.mode || data.Mode)) || currentMode;
   const prog = el('cascade-status');
   const bar = el('cascade-bar-fill');
   const btnCancel = el('btn-cascade-cancel');
   const btnClose = el('btn-cascade-close');
+  const titleEl = el('cascade-title');
+  if (titleEl) titleEl.textContent = modeTitle(mode || ch);
   if (prog) {
     if (cancelled) prog.textContent = `Скасовано: ${results.length}/${total}`;
-    else prog.textContent = `Готово: ${results.length}/${total}`;
+    else {
+      let failed = 0;
+      results.forEach(r => { const st = r.Status || r.status || ''; if (st !== 'sent') failed++; });
+      if (failed > 0) prog.textContent = `Готово: ${results.length}/${total} — ${failed} не доставлено (нема в ${modeChannelLabel(ch) || 'месенджері'})`;
+      else prog.textContent = `Готово: ${results.length}/${total}`;
+    }
   }
   if (bar) bar.style.width = '100%';
   if (btnCancel) { btnCancel.classList.add('hidden'); btnCancel.disabled = false; btnCancel.textContent = 'Скасувати'; }
   if (btnClose) btnClose.classList.remove('hidden');
-  // unlock body after short delay to let user see result
-  // keep overlay visible until user closes
   document.body.classList.remove('sending');
-  // also update bulk progress text
   const bulkProgress = el('bulk-send-progress');
   if (bulkProgress) {
     if (cancelled) { bulkProgress.textContent = `Скасовано: ${results.length}/${total}`; bulkProgress.className = 'small err'; }
-    else { bulkProgress.textContent = `Готово: ${results.length}/${total}`; bulkProgress.className = 'small ok'; }
+    else {
+      let failed = 0;
+      results.forEach(r => { const st = r.Status || r.status || ''; if (st !== 'sent') failed++; });
+      if (failed > 0) { bulkProgress.textContent = `Готово: ${results.length}/${total} — ${failed} не доставлено`; bulkProgress.className = 'small err'; }
+      else { bulkProgress.textContent = `Готово: ${results.length}/${total}`; bulkProgress.className = 'small ok'; }
+    }
   }
   // ensure all results rendered (in case progress events missed)
   if (results.length > 0) {
@@ -233,13 +256,15 @@ function appendRow(idx, name, phone, channel, status, err) {
   if (wrap) wrap.scrollTop = wrap.scrollHeight;
 }
 
-export function showOverlay(tot) {
+export function showOverlay(tot, mode = 'cascade') {
   total = tot;
   done = 0;
   isRunning = true;
+  currentMode = mode;
   const overlay = el('cascade-overlay');
   const tbody = el('cascade-table')?.querySelector('tbody');
   if (tbody) tbody.innerHTML = '';
+  const titleEl = el('cascade-title');
   const statusEl = el('cascade-status');
   const etaEl = el('cascade-eta');
   const pctEl = el('cascade-pct');
@@ -247,6 +272,7 @@ export function showOverlay(tot) {
   const cur = el('cascade-current');
   const btnCancel = el('btn-cascade-cancel');
   const btnClose = el('btn-cascade-close');
+  if (titleEl) titleEl.textContent = modeTitle(mode);
   if (statusEl) statusEl.textContent = `Відправляємо 0/${tot}`;
   if (etaEl) etaEl.textContent = fmtETA(tot * 11);
   if (pctEl) pctEl.textContent = '0%';
@@ -256,8 +282,7 @@ export function showOverlay(tot) {
   if (btnClose) btnClose.classList.add('hidden');
   if (overlay) overlay.classList.remove('hidden');
   document.body.classList.add('sending');
-  // lock main app scroll but keep overlay scrollable
-  document.getElementById('app')?.setAttribute('aria-hidden', 'true'); // for a11y, but keep overlay accessible
+  document.getElementById('app')?.setAttribute('aria-hidden', 'true');
 }
 
 export function hideOverlay() {

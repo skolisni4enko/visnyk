@@ -125,7 +125,11 @@ function renderPreview(result) {
     }
   }
 
+  const btnSendWa = el('btn-bulk-send-wa');
+  const btnSendTg = el('btn-bulk-send-tg');
   if (btnSend) btnSend.disabled = valid === 0;
+  if (btnSendWa) btnSendWa.disabled = valid === 0;
+  if (btnSendTg) btnSendTg.disabled = valid === 0;
   el('bulk-parse-stats').textContent = valid ? `Готово: ${valid} валідних` : '';
 }
 
@@ -145,6 +149,10 @@ function clearPreview() {
   if (counts) counts.innerHTML = '';
   const btnSend = el('btn-bulk-send');
   if (btnSend) btnSend.disabled = true;
+  const btnSendWa = el('btn-bulk-send-wa');
+  if (btnSendWa) btnSendWa.disabled = true;
+  const btnSendTg = el('btn-bulk-send-tg');
+  if (btnSendTg) btnSendTg.disabled = true;
   const stats = el('bulk-parse-stats');
   if (stats) stats.textContent = '';
 }

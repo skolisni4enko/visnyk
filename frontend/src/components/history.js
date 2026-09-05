@@ -166,6 +166,8 @@ let totalCount = 0;
 let totalPages = 1;
 let filterChannel = 'all';
 let filterStatus = 'all';
+let filterSearch = '';
+let searchDebounce = null;
 
 function updatePaginationUI() {
   const prev = el('btn-history-prev');
@@ -281,7 +283,7 @@ export function renderHistory(rawList, opts = {}) {
 }
 
 function getFilters() {
-  return { channel: filterChannel, status: filterStatus };
+  return { channel: filterChannel, status: filterStatus, search: filterSearch };
 }
 
 export async function loadHistory(page = 1) {
@@ -297,15 +299,34 @@ export async function loadHistory(page = 1) {
   try {
     curPage = Math.max(1, page);
     const offset = (curPage - 1) * PAGE_SIZE;
-    const { channel, status } = getFilters();
-    const useFiltered = channel !== 'all' || status !== 'all';
-    console.log(`loadHistory: page=${curPage} offset=${offset} limit=${PAGE_SIZE} channel=${channel} status=${status}`);
+    const { channel, status, search } = getFilters();
+    const useFiltered = channel !== 'all' || status !== 'all' || (search && search.trim() !== '');
+    console.log(`loadHistory: page=${curPage} offset=${offset} limit=${PAGE_SIZE} channel=${channel} status=${status} search=${JSON.stringify(search)}`);
     let raw, total;
     if (useFiltered) {
-      [raw, total] = await Promise.all([
-        window.go.ui.App.GetHistoryFiltered(PAGE_SIZE, offset, channel, status),
-        window.go.ui.App.GetHistoryCountFiltered(channel, status),
-      ]);
+      // Prefer new Search API if available (best practice), fallback to old filtered
+      const hasSearchAPI = typeof window.go.ui.App.GetHistoryFilteredSearch === 'function';
+      const hasCountSearchAPI = typeof window.go.ui.App.GetHistoryCountFilteredSearch === 'function';
+      if (search && search.trim() !== '' && hasSearchAPI && hasCountSearchAPI) {
+        [raw, total] = await Promise.all([
+          window.go.ui.App.GetHistoryFilteredSearch(PAGE_SIZE, offset, channel, status, search),
+          window.go.ui.App.GetHistoryCountFilteredSearch(channel, status, search),
+        ]);
+      } else if (search && search.trim() !== '') {
+        // fallback for older binary: fetch filtered page and filter search client-side (not ideal for pagination but better than nothing)
+        const [allRaw, allTotal] = await Promise.all([
+          window.go.ui.App.GetHistoryFiltered(PAGE_SIZE, offset, channel, status),
+          window.go.ui.App.GetHistoryCountFiltered(channel, status),
+        ]);
+        // store raw but frontend will filter? we just pass through and let render handle? For now fallback to server without search
+        raw = allRaw; total = allTotal;
+        console.warn('Search API not available in this binary, ignoring search param');
+      } else {
+        [raw, total] = await Promise.all([
+          window.go.ui.App.GetHistoryFiltered(PAGE_SIZE, offset, channel, status),
+          window.go.ui.App.GetHistoryCountFiltered(channel, status),
+        ]);
+      }
     } else {
       [raw, total] = await Promise.all([
         window.go.ui.App.GetHistoryPaged(PAGE_SIZE, offset),
@@ -450,15 +471,58 @@ export function initHistory() {
   el('btn-history-next')?.addEventListener('click', () => {
     if (curPage < totalPages) loadHistory(curPage + 1);
   });
-  // filters
+  // filters + search (best practice: debounced input, ESC to clear, server-side LIKE)
   const chSel = el('history-filter-channel');
   const stSel = el('history-filter-status');
+  const searchInput = el('history-search');
+  const searchClear = el('btn-history-search-clear');
+  function updateSearchClearVisibility() {
+    if (!searchInput || !searchClear) return;
+    if (searchInput.value.trim() !== '') searchClear.classList.remove('hidden');
+    else searchClear.classList.add('hidden');
+  }
   if (chSel) chSel.addEventListener('change', () => { filterChannel = chSel.value || 'all'; curPage = 1; loadHistory(1); });
   if (stSel) stSel.addEventListener('change', () => { filterStatus = stSel.value || 'all'; curPage = 1; loadHistory(1); });
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      updateSearchClearVisibility();
+      if (searchDebounce) clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(() => {
+        filterSearch = searchInput.value.trim();
+        curPage = 1; loadHistory(1);
+      }, 350);
+    });
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        searchInput.value = '';
+        filterSearch = '';
+        updateSearchClearVisibility();
+        curPage = 1; loadHistory(1);
+      }
+    });
+    searchInput.addEventListener('search', () => {
+      // for type=search clear via X button
+      if (searchInput.value === '') {
+        filterSearch = '';
+        updateSearchClearVisibility();
+        curPage = 1; loadHistory(1);
+      }
+    });
+  }
+  if (searchClear) searchClear.addEventListener('click', () => {
+    if (searchInput) searchInput.value = '';
+    filterSearch = '';
+    updateSearchClearVisibility();
+    if (searchInput) searchInput.focus();
+    curPage = 1; loadHistory(1);
+  });
   el('btn-history-filter-reset')?.addEventListener('click', () => {
-    filterChannel = 'all'; filterStatus = 'all';
+    filterChannel = 'all'; filterStatus = 'all'; filterSearch = '';
     if (chSel) chSel.value = 'all';
     if (stSel) stSel.value = 'all';
+    if (searchInput) searchInput.value = '';
+    updateSearchClearVisibility();
     curPage = 1; loadHistory(1);
   });
   // modal for clear — reuse generic modal logic
@@ -485,27 +549,38 @@ export function initHistory() {
           const res = await window.go.ui.App.ClearHistoryOnly();
           if (res && res.toLowerCase().includes('error')) alert(res);
           curPage = 1;
-          filterChannel = 'all'; filterStatus = 'all';
+          filterChannel = 'all'; filterStatus = 'all'; filterSearch = '';
           const chSel = el('history-filter-channel'); if (chSel) chSel.value = 'all';
           const stSel = el('history-filter-status'); if (stSel) stSel.value = 'all';
+          const sInput = el('history-search'); if (sInput) sInput.value = '';
+          const sClear = el('btn-history-search-clear'); if (sClear) sClear.classList.add('hidden');
           await loadHistory(1);
         } catch (e) { alert(String(e)); }
       }
     );
   });
 
-  // sync selects with state on init
+  // sync selects/search with state on init
   const initCh = el('history-filter-channel'); if (initCh) initCh.value = filterChannel;
   const initSt = el('history-filter-status'); if (initSt) initSt.value = filterStatus;
+  const initSearch = el('history-search'); if (initSearch) initSearch.value = filterSearch;
+  updateSearchClearVisibility && updateSearchClearVisibility();
 
   let tries = 0;
   const tryLoad = async () => {
     tries++;
     if (isWailsAvailable()) {
-      // preload count for badge even when overlay closed (respect filters if not default)
+      // preload count for badge even when overlay closed (respect filters if not default, including search)
       try {
-        const useF = filterChannel !== 'all' || filterStatus !== 'all';
-        const c = useF ? await window.go.ui.App.GetHistoryCountFiltered(filterChannel, filterStatus) : await window.go.ui.App.GetHistoryCount();
+        const useF = filterChannel !== 'all' || filterStatus !== 'all' || (filterSearch && filterSearch.trim() !== '');
+        let c;
+        if (useF && typeof window.go.ui.App.GetHistoryCountFilteredSearch === 'function' && filterSearch.trim() !== '') {
+          c = await window.go.ui.App.GetHistoryCountFilteredSearch(filterChannel, filterStatus, filterSearch);
+        } else if (useF) {
+          c = await window.go.ui.App.GetHistoryCountFiltered(filterChannel, filterStatus);
+        } else {
+          c = await window.go.ui.App.GetHistoryCount();
+        }
         totalCount = typeof c === 'number' ? c : 0;
         totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
         const badge = el('history-badge');

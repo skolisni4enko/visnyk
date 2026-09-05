@@ -23,7 +23,7 @@ import (
 )
 
 // Version injected from main.
-var AppVersion = "0.1.0"
+var AppVersion = "0.1.1"
 
 // App is the Wails-bound application. All methods are exposed to the frontend.
 type App struct {
@@ -274,6 +274,88 @@ func (a *App) SendCascadeBatch(contacts []cascade.Contact, template string) []ca
 // StartCascadeBatch starts async cascade with progress events. Returns "" on success or error string.
 // Frontend listens to "cascade:progress" and "cascade:done" events.
 func (a *App) StartCascadeBatch(contacts []cascade.Contact, template string) string {
+	return a.startBatchInternal(contacts, template, "", cascade.ChannelNone)
+}
+
+// StartWhatsAppBatch sends only via WhatsApp (no cascade fallback).
+func (a *App) StartWhatsAppBatch(contacts []cascade.Contact, template string) string {
+	return a.startBatchInternal(contacts, template, "whatsapp", cascade.ChannelWhatsApp)
+}
+
+// StartTelegramBatch sends only via Telegram (no cascade fallback).
+func (a *App) StartTelegramBatch(contacts []cascade.Contact, template string) string {
+	return a.startBatchInternal(contacts, template, "telegram", cascade.ChannelTelegram)
+}
+
+// SendWhatsAppBatch sync direct WA batch (for tests / non-async usage).
+func (a *App) SendWhatsAppBatch(contacts []cascade.Contact, template string) []cascade.SendResult {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.logFile("INFO", "whatsapp-direct", fmt.Sprintf("batch start (sync) total=%d", len(contacts)))
+	res := a.cascadeSvc.SendBatchDirect(ctx, contacts, template, cascade.ChannelWhatsApp)
+	a.persistDirectResults(res, template, "whatsapp-direct")
+	return res
+}
+
+// SendTelegramBatch sync direct TG batch.
+func (a *App) SendTelegramBatch(contacts []cascade.Contact, template string) []cascade.SendResult {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.logFile("INFO", "telegram-direct", fmt.Sprintf("batch start (sync) total=%d", len(contacts)))
+	res := a.cascadeSvc.SendBatchDirect(ctx, contacts, template, cascade.ChannelTelegram)
+	a.persistDirectResults(res, template, "telegram-direct")
+	return res
+}
+
+func (a *App) persistDirectResults(res []cascade.SendResult, template, source string) {
+	if a.store != nil {
+		for _, r := range res {
+			_ = a.store.AddHistory(storage.HistoryEntry{
+				Phone:          r.Contact.PhoneRaw,
+				Normalized:     r.Contact.NormalizedPhone,
+				Name:           r.Contact.Name,
+				Channel:        string(r.Channel),
+				Status:         r.Status,
+				Error:          r.Error,
+				SentAt:         r.SentAt,
+				MessagePreview: template,
+			})
+			_ = a.store.Log("INFO", source, fmt.Sprintf("send %s via %s status=%s err=%s", r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error))
+		}
+	}
+	for _, r := range res {
+		a.logFile("INFO", source, fmt.Sprintf("send %s (%s) via %s status=%s err=%s", r.Contact.PhoneRaw, r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error))
+	}
+	a.logFile("INFO", source, fmt.Sprintf("batch done (sync) sent=%d total=%d", countSent(res), len(res)))
+}
+
+func (a *App) startBatchInternal(contacts []cascade.Contact, template string, logSource string, ch cascade.Channel) string {
+	isDirect := ch != cascade.ChannelNone && ch != ""
+	source := logSource
+	sendFn := func(ctx context.Context, onProgress func(cascade.Progress)) []cascade.SendResult {
+		return a.cascadeSvc.SendBatchWithProgress(ctx, contacts, template, onProgress)
+	}
+	if isDirect {
+		if ch == cascade.ChannelWhatsApp {
+			if a.whatsappSvc == nil || !a.whatsappSvc.IsConnected() || !a.whatsappSvc.IsLoggedIn() {
+				return "підключи WhatsApp перед відправкою в WhatsApp"
+			}
+		}
+		if ch == cascade.ChannelTelegram {
+			if a.telegramSvc == nil || !a.telegramSvc.IsConnected() || !a.telegramSvc.IsLoggedIn() {
+				return "підключи Telegram перед відправкою в Telegram"
+			}
+		}
+		sendFn = func(ctx context.Context, onProgress func(cascade.Progress)) []cascade.SendResult {
+			return a.cascadeSvc.SendBatchDirectWithProgress(ctx, contacts, template, ch, onProgress)
+		}
+	} else {
+		source = "cascade"
+	}
 	a.cascadeMu.Lock()
 	if a.cascadeRunning {
 		a.cascadeMu.Unlock()
@@ -294,13 +376,12 @@ func (a *App) StartCascadeBatch(contacts []cascade.Contact, template string) str
 	a.cascadeRunning = true
 	a.cascadeMu.Unlock()
 
-	a.logFile("INFO", "cascade", fmt.Sprintf("batch start async total=%d", len(contacts)))
+	a.logFile("INFO", source, fmt.Sprintf("batch start async total=%d", len(contacts)))
 	if a.store != nil {
-		_ = a.store.Log("INFO", "cascade", fmt.Sprintf("batch start async total=%d", len(contacts)))
+		_ = a.store.Log("INFO", source, fmt.Sprintf("batch start async total=%d", len(contacts)))
 	}
-	// emit start
 	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "cascade:start", map[string]interface{}{"total": len(contacts)})
+		wailsRuntime.EventsEmit(a.ctx, "cascade:start", map[string]interface{}{"total": len(contacts), "channel": string(ch), "mode": source})
 	}
 
 	go func() {
@@ -316,15 +397,11 @@ func (a *App) StartCascadeBatch(contacts []cascade.Contact, template string) str
 			if a.ctx != nil {
 				wailsRuntime.EventsEmit(a.ctx, "cascade:progress", p)
 			}
-			// log checking vs done differently
 			if p.Status == "checking" {
-				a.logFile("INFO", "cascade", fmt.Sprintf("checking %d/%d %s (%s)", p.Index, p.Total, p.Contact.NormalizedPhone, p.Contact.Name))
+				a.logFile("INFO", source, fmt.Sprintf("checking %d/%d %s (%s)", p.Index, p.Total, p.Contact.NormalizedPhone, p.Contact.Name))
 			} else {
-				// sent/failed result
-				a.logFile("INFO", "cascade", fmt.Sprintf("progress %d/%d %s via %s status=%s err=%s eta=%ds", p.Index, p.Total, p.Contact.NormalizedPhone, p.Channel, p.Status, p.Error, p.ETASeconds))
-				// persist history per contact as soon as done
+				a.logFile("INFO", source, fmt.Sprintf("progress %d/%d %s via %s status=%s err=%s eta=%ds", p.Index, p.Total, p.Contact.NormalizedPhone, p.Channel, p.Status, p.Error, p.ETASeconds))
 				if a.store != nil {
-					// find matching result: p after send
 					_ = a.store.AddHistory(storage.HistoryEntry{
 						Phone:          p.Contact.PhoneRaw,
 						Normalized:     p.Contact.NormalizedPhone,
@@ -335,24 +412,23 @@ func (a *App) StartCascadeBatch(contacts []cascade.Contact, template string) str
 						SentAt:         p.SentAt,
 						MessagePreview: template,
 					})
-					_ = a.store.Log("INFO", "cascade", fmt.Sprintf("send %s via %s status=%s", p.Contact.NormalizedPhone, p.Channel, p.Status))
+					_ = a.store.Log("INFO", source, fmt.Sprintf("send %s via %s status=%s", p.Contact.NormalizedPhone, p.Channel, p.Status))
 				}
 			}
 		}
 
-		allResults = a.cascadeSvc.SendBatchWithProgress(ctx, contacts, template, onProgress)
+		allResults = sendFn(ctx, onProgress)
 
-		// check if cancelled
 		cancelled := ctx.Err() != nil
 		if cancelled {
-			a.logFile("WARN", "cascade", fmt.Sprintf("batch cancelled at %d/%d", len(allResults), len(contacts)))
+			a.logFile("WARN", source, fmt.Sprintf("batch cancelled at %d/%d", len(allResults), len(contacts)))
 			if a.store != nil {
-				_ = a.store.Log("WARN", "cascade", fmt.Sprintf("batch cancelled at %d/%d", len(allResults), len(contacts)))
+				_ = a.store.Log("WARN", source, fmt.Sprintf("batch cancelled at %d/%d", len(allResults), len(contacts)))
 			}
 		} else {
-			a.logFile("INFO", "cascade", fmt.Sprintf("batch done async sent=%d failed=%d total=%d", countSent(allResults), len(allResults)-countSent(allResults), len(allResults)))
+			a.logFile("INFO", source, fmt.Sprintf("batch done async sent=%d failed=%d total=%d", countSent(allResults), len(allResults)-countSent(allResults), len(allResults)))
 			if a.store != nil {
-				_ = a.store.Log("INFO", "cascade", fmt.Sprintf("batch done async total=%d", len(allResults)))
+				_ = a.store.Log("INFO", source, fmt.Sprintf("batch done async total=%d", len(allResults)))
 			}
 		}
 		if a.ctx != nil {
@@ -360,6 +436,8 @@ func (a *App) StartCascadeBatch(contacts []cascade.Contact, template string) str
 				"results":   allResults,
 				"cancelled": cancelled,
 				"total":     len(contacts),
+				"channel":   string(ch),
+				"mode":      source,
 			})
 		}
 	}()
@@ -877,12 +955,21 @@ func (a *App) GetHistoryCount() int {
 	return n
 }
 
-// GetHistoryFiltered returns filtered history page.
+// GetHistoryFiltered returns filtered history page. search is optional free-text (phone, name, channel, status, error, message).
 func (a *App) GetHistoryFiltered(limit, offset int, channel, status string) []storage.HistoryEntry {
 	if a.store == nil {
 		return nil
 	}
 	h, _ := a.store.ListHistoryFiltered(limit, offset, channel, status)
+	return h
+}
+
+// GetHistoryFilteredSearch returns filtered history with search (best practice: LIKE with ESCAPE, debounced frontend).
+func (a *App) GetHistoryFilteredSearch(limit, offset int, channel, status, search string) []storage.HistoryEntry {
+	if a.store == nil {
+		return nil
+	}
+	h, _ := a.store.ListHistoryFilteredSearch(limit, offset, channel, status, search)
 	return h
 }
 
@@ -892,6 +979,15 @@ func (a *App) GetHistoryCountFiltered(channel, status string) int {
 		return 0
 	}
 	n, _ := a.store.CountHistoryFiltered(channel, status)
+	return n
+}
+
+// GetHistoryCountFilteredSearch returns count for filters with search.
+func (a *App) GetHistoryCountFilteredSearch(channel, status, search string) int {
+	if a.store == nil {
+		return 0
+	}
+	n, _ := a.store.CountHistoryFilteredSearch(channel, status, search)
 	return n
 }
 

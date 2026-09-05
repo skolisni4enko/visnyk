@@ -207,6 +207,8 @@
         <textarea id="bulk-template" class="hidden" aria-hidden="true"></textarea>
         <div class="actions">
           <button id="btn-bulk-send" class="btn primary small" disabled>Надіслати каскадом WA → TG</button>
+          <button id="btn-bulk-send-wa" class="btn small" disabled style="border-color:#a7f3d0;background:#ecfdf5;color:#065f46">Надіслати WA</button>
+          <button id="btn-bulk-send-tg" class="btn small" disabled style="border-color:#93c5fd;background:#eff6ff;color:#1e40af">Надіслати TG</button>
           <button id="btn-open-history" class="btn ghost small">Історія <span id="history-badge" class="badge" style="margin-left:4px">0</span></button>
           <span id="bulk-send-progress" class="small mono"></span>
           <button id="btn-bulk-open-logs" class="btn ghost small" title="Відкрити app.log">Відкрити логи</button>
@@ -281,7 +283,11 @@
             <option value="skipped">skipped</option>
           </select>
         </label>
-        <button id="btn-history-filter-reset" class="btn ghost small" style="margin-left:auto">Скинути</button>
+        <label class="small" style="display:flex;align-items:center;gap:4px;flex:1 1 200px;min-width:160px">Пошук:
+          <input id="history-search" type="search" placeholder="номер, ім'я, канал, помилка..." autocomplete="off" style="flex:1;border:1px solid #d4d4d4;border-radius:6px;padding:4px 8px;background:#fff;min-width:120px" />
+          <button id="btn-history-search-clear" class="btn ghost small hidden" title="Очистити пошук" style="padding:2px 6px;min-height:24px">✕</button>
+        </label>
+        <button id="btn-history-filter-reset" class="btn ghost small">Скинути</button>
       </div>
       <p class="hint" style="margin:2px 0 6px">Клік по рядку — копіює номер (як введено). Нові зверху, групи Сьогодні / Вчора.</p>
       <div class="table-wrap history-wrap">
