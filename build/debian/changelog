@@ -1,16 +1,17 @@
 visnyk (0.1.1-1) noble; urgency=low
 
-  * Пряма відправка: додано кнопки «Надіслати WA» та «Надіслати TG» поруч
-    із «Надіслати каскадом WA→TG». Пряма відправка йде тільки в обраний
-    месенджер без каскадного fallback, з помилкою «контакт відсутній у
-    WhatsApp/Telegram» / «не вдалося відправити в ...», збережено затримку
-    8–15с + jitter, логування та історію.
+  * Direct send: added Send WA and Send TG buttons alongside
+    broadcast to all. Direct send targets a single messenger without
+    fallback and reports contact not found in WhatsApp/Telegram or
+    send failure. Delay 8-15s + jitter, logging and history preserved.
+    Broadcast now delivers to all available messengers (was first
+    available). History shows multiple channels with "all" indicator.
 
  -- Visnyk Team <team@visnyk.local>  Fri, 05 Sep 2026 12:00:00 +0200
 
 visnyk (0.1.0-1) noble; urgency=low
 
-  * Initial release: каскадна розсилка WA -> TG -> Viber, Wails,
-    шифроване зберігання.
+  * Initial release: broadcast messenger for WA, TG, Viber with Wails,
+    encrypted storage.
 
  -- Visnyk Team <team@visnyk.local>  Thu, 03 Sep 2026 12:00:00 +0200

@@ -1,10 +1,10 @@
 [Desktop Entry]
 Name=Visnyk
-Comment=Каскадна розсилка WA → TG → Viber
+Comment=Broadcast to all available messengers - WhatsApp, Telegram, Viber
 Exec=/usr/bin/visnyk
 Icon=visnyk
 Terminal=false
 Type=Application
-Categories=Utility;Telephony;
-Keywords=messenger;whatsapp;telegram;viber;
+Categories=Utility;Network;Telephony;
+Keywords=messenger;whatsapp;telegram;viber;broadcast;
 StartupWMClass=visnyk

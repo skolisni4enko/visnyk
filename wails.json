@@ -14,7 +14,7 @@
     "productName": "Visnyk",
     "productVersion": "0.1.1",
     "copyright": "Copyright (c) 2026 Visnyk Team",
-    "comments": "Cascade broadcast WA -> TG -> Viber"
+    "comments": "Broadcast to all available messengers - WhatsApp, Telegram, Viber"
   },
   "assetdir": "./frontend/dist",
   "reloaddirs": "./frontend/dist",

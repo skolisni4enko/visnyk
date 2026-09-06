@@ -14,8 +14,8 @@
       <div style="display:flex;align-items:center;justify-content:center;gap:10px">
         <img src="./appicon.png" alt="Visnyk" width="36" height="36" style="border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)"/>
         <div>
-          <h1>Вісник — каскадна розсилка</h1>
-          <p class="subtitle">WhatsApp → Telegram → Viber · затримка 8–15 сек</p>
+          <h1>Вісник — розсилка у всі месенджери</h1>
+          <p class="subtitle">WhatsApp · Telegram · Viber — у всі доступні · затримка 8–15 сек</p>
         </div>
       </div>
     </header>
@@ -131,7 +131,7 @@
         <div id="conn-panel-viber" class="panel conn-panel" role="tabpanel" aria-hidden="true">
           <div class="messenger" style="align-items:center;text-align:center;padding:20px 12px">
             <p class="small" style="font-size:0.84rem;font-weight:600">Viber — скоро</p>
-            <p class="hint">Інтеграція Viber (REST API / stub) в розробці. Поки використовуйте WhatsApp → Telegram каскад.</p>
+            <p class="hint">Інтеграція Viber (REST API / stub) в розробці. Поки повідомлення йде у WhatsApp і Telegram одночасно.</p>
           </div>
         </div>
       </div>
@@ -206,7 +206,7 @@
         </div>
         <textarea id="bulk-template" class="hidden" aria-hidden="true"></textarea>
         <div class="actions">
-          <button id="btn-bulk-send" class="btn primary small" disabled>Надіслати каскадом WA → TG</button>
+          <button id="btn-bulk-send" class="btn primary small" disabled>Надіслати у всі месенджери</button>
           <button id="btn-bulk-send-wa" class="btn small" disabled style="border-color:#a7f3d0;background:#ecfdf5;color:#065f46">Надіслати WA</button>
           <button id="btn-bulk-send-tg" class="btn small" disabled style="border-color:#93c5fd;background:#eff6ff;color:#1e40af">Надіслати TG</button>
           <button id="btn-open-history" class="btn ghost small">Історія <span id="history-badge" class="badge" style="margin-left:4px">0</span></button>
@@ -218,7 +218,7 @@
       </div>
     </section>
 
-    <footer class="footer small">Каскад WA → TG → Viber · Затримка 8–15 сек · Не більше 50/год</footer>
+    <footer class="footer small">Розсилка у всі доступні · Затримка 8–15 сек · Не більше 50/год</footer>
   </main>
   <div id="logout-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="modal-backdrop" id="modal-backdrop"></div>

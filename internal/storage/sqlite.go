@@ -250,8 +250,9 @@ func (s *Store) ListHistoryFilteredSearch(limit, offset int, channel, status, se
 	q := `SELECT id,phone,normalized,COALESCE(name,''),channel,status,COALESCE(error,''),sent_at,COALESCE(message_preview,'') FROM history WHERE 1=1`
 	args := []interface{}{}
 	if channel != "" && channel != "all" {
-		q += ` AND channel = ?`
-		args = append(args, channel)
+		// Support broadcast combined channels "whatsapp,telegram" — match if channel contains the filtered one
+		q += ` AND (',' || channel || ',' LIKE '%,' || ? || ',%' ESCAPE '\')`
+		args = append(args, escapeLike(channel))
 	}
 	if status != "" && status != "all" {
 		q += ` AND status = ?`
@@ -298,8 +299,8 @@ func (s *Store) CountHistoryFilteredSearch(channel, status, search string) (int,
 	q := `SELECT COUNT(*) FROM history WHERE 1=1`
 	args := []interface{}{}
 	if channel != "" && channel != "all" {
-		q += ` AND channel = ?`
-		args = append(args, channel)
+		q += ` AND (',' || channel || ',' LIKE '%,' || ? || ',%' ESCAPE '\')`
+		args = append(args, escapeLike(channel))
 	}
 	if status != "" && status != "all" {
 		q += ` AND status = ?`

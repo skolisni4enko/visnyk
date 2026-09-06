@@ -27,8 +27,8 @@ func New(wa, tg, vb Messenger) *Service {
 	}
 }
 
-// SendBatch sends to each contact via first available channel.
-// It respects ctx cancellation and sleeps with jitter between sends.
+// SendBatch sends to each contact via all available channels (broadcast).
+// It respects ctx cancellation and sleeps with jitter between contacts.
 func (s *Service) SendBatch(ctx context.Context, contacts []Contact, template string) []SendResult {
 	return s.SendBatchWithProgress(ctx, contacts, template, nil)
 }
@@ -150,22 +150,70 @@ func (s *Service) SendBatchWithProgress(ctx context.Context, contacts []Contact,
 }
 
 func (s *Service) sendOne(_ context.Context, c Contact, tmpl string) SendResult {
+	// Broadcast to all available messengers, not just first.
+	// Returns aggregated result: Channel is comma-separated list of successful channels,
+	// Status is "sent" if at least one succeeded, otherwise "failed".
 	msg := tmpl // abstract message — no name/phone substitution
 	channels := []Messenger{s.whatsapp, s.telegram, s.viber}
+	var sentChannels []string
+	var errs []string
+	var lastSentAt time.Time
 	for _, m := range channels {
 		if m == nil {
 			continue
 		}
 		ok, err := m.IsAvailable(c.NormalizedPhone)
-		if err != nil || !ok {
+		if err != nil {
+			errs = append(errs, channelLabel(m.Name())+": перевірка не вдалася: "+err.Error())
+			continue
+		}
+		if !ok {
+			// not available — not an error for broadcast, just skip
 			continue
 		}
 		if err := m.Send(c.NormalizedPhone, msg); err != nil {
-			return SendResult{Contact: c, Channel: m.Name(), Status: "failed", Error: err.Error(), SentAt: time.Now()}
+			errs = append(errs, channelLabel(m.Name())+": не вдалося відправити: "+err.Error())
+			continue
 		}
-		return SendResult{Contact: c, Channel: m.Name(), Status: "sent", SentAt: time.Now()}
+		sentChannels = append(sentChannels, string(m.Name()))
+		lastSentAt = time.Now()
 	}
-	return SendResult{Contact: c, Channel: ChannelNone, Status: "failed", Error: "no messenger available", SentAt: time.Now()}
+	if len(sentChannels) == 0 {
+		errStr := "жоден месенджер не доступний"
+		if len(errs) > 0 {
+			errStr = joinErrors(errs)
+		}
+		return SendResult{Contact: c, Channel: ChannelNone, Status: "failed", Error: errStr, SentAt: time.Now()}
+	}
+	combined := Channel(joinChannels(sentChannels))
+	errStr := ""
+	if len(errs) > 0 {
+		errStr = joinErrors(errs)
+	}
+	return SendResult{Contact: c, Channel: combined, Status: "sent", Error: errStr, SentAt: lastSentAt}
+}
+
+func joinChannels(ch []string) string {
+	// Use comma as separator for DB and UI; UI will split and render multiple badges
+	out := ""
+	for i, c := range ch {
+		if i > 0 {
+			out += ","
+		}
+		out += c
+	}
+	return out
+}
+
+func joinErrors(errs []string) string {
+	out := ""
+	for i, e := range errs {
+		if i > 0 {
+			out += "; "
+		}
+		out += e
+	}
+	return out
 }
 
 func (s *Service) messengerFor(ch Channel) Messenger {

@@ -143,7 +143,7 @@ let currentMode = 'cascade';
 function modeTitle(mode) {
   if (mode === 'whatsapp' || mode === 'whatsapp-direct') return 'Розсилка — тільки WhatsApp';
   if (mode === 'telegram' || mode === 'telegram-direct') return 'Розсилка — тільки Telegram';
-  return 'Розсилка — Каскад WA → TG';
+  return 'Розсилка — у всі месенджери';
 }
 function modeChannelLabel(ch) {
   if (ch === 'whatsapp') return 'WhatsApp';
@@ -237,6 +237,24 @@ function updateBar(idx, tot) {
   if (pctEl) pctEl.textContent = pct + '%';
 }
 
+function channelBadgeHtml(ch) {
+  const raw = String(ch || 'none').toLowerCase();
+  if (!raw || raw === 'none') return '<span class="badge badge-invalid">none</span>';
+  const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length > 1) {
+    return parts.map(p => {
+      if (p === 'whatsapp') return '<span class="badge badge-valid">whatsapp</span>';
+      if (p === 'telegram') return '<span class="badge badge-warn">telegram</span>';
+      if (p === 'viber') return '<span class="badge" style="background:#f3e8ff;border-color:#e9d5ff;color:#6b21a8">viber</span>';
+      return `<span class="badge">${escapeHtml(p)}</span>`;
+    }).join(' ') + ' <span class="small ok" style="font-weight:700" title="всі доступні">✓ всі</span>';
+  }
+  if (raw === 'whatsapp') return '<span class="badge badge-valid">whatsapp</span>';
+  if (raw === 'telegram') return '<span class="badge badge-warn">telegram</span>';
+  if (raw === 'viber') return '<span class="badge" style="background:#f3e8ff;border-color:#e9d5ff;color:#6b21a8">viber</span>';
+  return `<span class="badge">${escapeHtml(raw)}</span>`;
+}
+
 function appendRow(idx, name, phone, channel, status, err) {
   const tbody = el('cascade-table')?.querySelector('tbody');
   if (!tbody) return;
@@ -246,7 +264,7 @@ function appendRow(idx, name, phone, channel, status, err) {
     <td>${idx}</td>
     <td title="${escapeHtml(name)}">${escapeHtml(name || '—')}</td>
     <td class="mono">${escapeHtml(phone)}</td>
-    <td><span class="badge ${channel === 'whatsapp' ? 'badge-valid' : channel === 'telegram' ? 'badge-warn' : 'badge-invalid'}">${escapeHtml(channel || 'none')}</span></td>
+    <td>${channelBadgeHtml(channel)}</td>
     <td><span class="small ${isSent ? 'ok' : 'err'}" style="font-weight:600">${escapeHtml(status)}</span></td>
     <td class="small" title="${escapeHtml(err)}">${escapeHtml(err || '')}</td>
   `;

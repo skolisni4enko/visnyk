@@ -4,13 +4,12 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: Visnyk Team <team@visnyk.local>
-Description: каскадна розсилка для месенджерів WA, TG, Viber
- Перевіряє доступність номера в месенджерах у пріоритеті
- WhatsApp → Telegram → Viber і надсилає повідомлення в перший доступний.
- Використовує один особистий акаунт на месенджер.
- 0.1.1: додано пряму відправку — кнопки «Надіслати WA» та «Надіслати TG»
- поруч із каскадом WA→TG; відправка тільки в обраний месенджер без fallback,
- з помилкою «контакт відсутній у ...» та збереженням затримки 8–15с.
+Description: broadcast messenger for WA, TG, Viber
+ Checks number availability and delivers to all available messengers.
+ Uses a single personal account per messenger.
+ 0.1.1: added direct send — Send WA and Send TG buttons alongside
+ broadcast to all. Direct send targets one messenger without fallback
+ and reports contact not found or send failure. Delay 8-15s preserved.
 Depends: libc6, libgtk-3-0, libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37
 Recommends: libayatana-appindicator3-1
 Homepage: https://github.com/visnyk/visnyk

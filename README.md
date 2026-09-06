@@ -1,6 +1,6 @@
 # visnyk
 
-Cascade broadcast for your inner circle. Checks number availability across messengers in priority **WhatsApp → Telegram → Viber** and sends the message to the first available. Uses a single personal account per messenger. Educational Go project.
+Broadcast for your inner circle. Checks number availability across **WhatsApp, Telegram, Viber** and delivers to **all available** messengers. Also supports direct Send WA / Send TG. Uses a single personal account per messenger. Educational Go project.
 
 [![Go](https://img.shields.io/badge/Go-1.26-blue)](#)
 [![Wails](https://img.shields.io/badge/Wails-v2-red)](#)
@@ -58,7 +58,7 @@ Sessions are stored locally and ignored by git:
 
 ```
 Wails UI (frontend/*) → internal/ui.App (thin binding)
-                    → internal/cascade (WA > TG > VIBER, jitter 8–15s)
+                    → internal/cascade (broadcast to all WA, TG, VIBER; direct WA/TG; jitter 8–15s)
                     → internal/whatsapp / internal/telegram / internal/viber
                     → internal/normalizer + internal/common + internal/storage
 ```
