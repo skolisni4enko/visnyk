@@ -1,17 +1,18 @@
 name: visnyk
 arch: amd64
 platform: linux
-version: 0.1.1
+version: 0.2.0
 section: utils
 priority: optional
 maintainer: Visnyk Team <team@visnyk.local>
 description: |
   Broadcast messenger for WA, TG, Viber.
   Checks number availability and delivers to all available messengers.
-  0.1.1: added direct send — Send WA and Send TG buttons alongside
-  broadcast to all. Direct send targets a single messenger without fallback
-  and reports contact not found in WhatsApp/Telegram or send failure.
-  Delay 8-15s + jitter, logging and history are preserved.
+  0.2.0: Telegram resolve-first send (no address-book pollution), parallel
+  WA/TG delivery with per-channel pacing and full FLOOD_WAIT handling,
+  circuit breaker on dead sessions, background health monitor, bulk paste
+  auto-tidies numbers into one column. Delay 8-15s + jitter, logging and
+  history are preserved.
 vendor: Visnyk
 homepage: https://github.com/visnyk/visnyk
 license: MIT

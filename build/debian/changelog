@@ -1,3 +1,14 @@
+visnyk (0.2.0-1) noble; urgency=low
+
+  * Telegram resolve-first send (no address-book pollution), parallel
+    WA/TG delivery with per-channel pacing and full FLOOD_WAIT handling.
+    Dead-session circuit breaker, background health monitor with cached
+    status. Bulk paste auto-tidies numbers into one column. Broadcast
+    delivers to all available messengers. Delay 8-15s + jitter, logging
+    and history preserved.
+
+ -- Visnyk Team <team@visnyk.local>  Sun, 07 Sep 2026 12:00:00 +0200
+
 visnyk (0.1.1-1) noble; urgency=low
 
   * Direct send: added Send WA and Send TG buttons alongside

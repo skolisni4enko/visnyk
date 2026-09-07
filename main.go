@@ -13,8 +13,8 @@ import (
 	"visnyk/internal/ui"
 )
 
-// Version is set via ldflags -X main.Version=0.1.1 or wails.json info.productVersion
-var Version = "0.1.1"
+// Version is set via ldflags -X main.Version=0.2.0 or wails.json info.productVersion
+var Version = "0.2.0"
 
 //go:embed all:frontend/dist
 var assets embed.FS
