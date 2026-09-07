@@ -13,6 +13,18 @@ type HistoryEntry struct {
 	Error          string    `json:"error,omitempty"`
 	SentAt         time.Time `json:"sentAt"`
 	MessagePreview string    `json:"messagePreview,omitempty"`
+	BatchID        string    `json:"batchId,omitempty"`
+	BatchName      string    `json:"batchName,omitempty"`
+}
+
+// Batch — aggregate for history grouping.
+type Batch struct {
+	ID             string    `json:"id"`
+	Name           string    `json:"name,omitempty"`
+	Channel        string    `json:"channel"`
+	MessagePreview string    `json:"messagePreview,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	Total          int       `json:"total"`
 }
 
 // LogEntry — app log row.

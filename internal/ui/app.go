@@ -2,7 +2,9 @@ package ui
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -296,6 +298,12 @@ func (a *App) SendWhatsApp(phone, message string) string {
 	return ""
 }
 
+func generateBatchID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return time.Now().UTC().Format("20060102T150405") + "-" + hex.EncodeToString(b)
+}
+
 // SendCascadeBatch sends via cascade WA → TG → Viber (currently WA only).
 // contacts are slice of {Name,PhoneRaw,NormalizedPhone} passed from frontend.
 func (a *App) SendCascadeBatch(contacts []cascade.Contact, template string) []cascade.SendResult {
@@ -303,9 +311,13 @@ func (a *App) SendCascadeBatch(contacts []cascade.Contact, template string) []ca
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	batchID := generateBatchID()
 	// file + db log start
-	a.logFile("INFO", "cascade", fmt.Sprintf("batch start (sync) total=%d template_len=%d", len(contacts), len(template)))
-	res := a.cascadeSvc.SendBatch(ctx, contacts, template)
+	a.logFile("INFO", "cascade", fmt.Sprintf("batch start (sync) batch=%s total=%d template_len=%d", batchID, len(contacts), len(template)))
+	if a.store != nil {
+		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: "cascade", MessagePreview: template, CreatedAt: time.Now(), Total: len(contacts)})
+	}
+	res := a.cascadeSvc.SendBatchWithBatch(ctx, contacts, template, batchID)
 	if a.store != nil {
 		for _, r := range res {
 			_ = a.store.AddHistory(storage.HistoryEntry{
@@ -317,14 +329,15 @@ func (a *App) SendCascadeBatch(contacts []cascade.Contact, template string) []ca
 				Error:          r.Error,
 				SentAt:         r.SentAt,
 				MessagePreview: template,
+				BatchID:        r.BatchID,
 			})
-			_ = a.store.Log("INFO", "cascade", fmt.Sprintf("send %s via %s status=%s err=%s", r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error))
+			_ = a.store.Log("INFO", "cascade", fmt.Sprintf("send %s via %s status=%s err=%s batch=%s", r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error, r.BatchID))
 		}
 	}
 	for _, r := range res {
-		a.logFile("INFO", "cascade", fmt.Sprintf("send %s (%s) via %s status=%s err=%s", r.Contact.PhoneRaw, r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error))
+		a.logFile("INFO", "cascade", fmt.Sprintf("send %s (%s) via %s status=%s err=%s batch=%s", r.Contact.PhoneRaw, r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error, r.BatchID))
 	}
-	a.logFile("INFO", "cascade", fmt.Sprintf("batch done (sync) sent=%d total=%d", countSent(res), len(res)))
+	a.logFile("INFO", "cascade", fmt.Sprintf("batch done (sync) batch=%s sent=%d total=%d", batchID, countSent(res), len(res)))
 	return res
 }
 
@@ -350,8 +363,12 @@ func (a *App) SendWhatsAppBatch(contacts []cascade.Contact, template string) []c
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	a.logFile("INFO", "whatsapp-direct", fmt.Sprintf("batch start (sync) total=%d", len(contacts)))
-	res := a.cascadeSvc.SendBatchDirect(ctx, contacts, template, cascade.ChannelWhatsApp)
+	batchID := generateBatchID()
+	a.logFile("INFO", "whatsapp-direct", fmt.Sprintf("batch start (sync) batch=%s total=%d", batchID, len(contacts)))
+	if a.store != nil {
+		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: "whatsapp", MessagePreview: template, CreatedAt: time.Now(), Total: len(contacts)})
+	}
+	res := a.cascadeSvc.SendBatchDirectWithBatch(ctx, contacts, template, cascade.ChannelWhatsApp, batchID)
 	a.persistDirectResults(res, template, "whatsapp-direct")
 	return res
 }
@@ -362,8 +379,12 @@ func (a *App) SendTelegramBatch(contacts []cascade.Contact, template string) []c
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	a.logFile("INFO", "telegram-direct", fmt.Sprintf("batch start (sync) total=%d", len(contacts)))
-	res := a.cascadeSvc.SendBatchDirect(ctx, contacts, template, cascade.ChannelTelegram)
+	batchID := generateBatchID()
+	a.logFile("INFO", "telegram-direct", fmt.Sprintf("batch start (sync) batch=%s total=%d", batchID, len(contacts)))
+	if a.store != nil {
+		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: "telegram", MessagePreview: template, CreatedAt: time.Now(), Total: len(contacts)})
+	}
+	res := a.cascadeSvc.SendBatchDirectWithBatch(ctx, contacts, template, cascade.ChannelTelegram, batchID)
 	a.persistDirectResults(res, template, "telegram-direct")
 	return res
 }
@@ -380,21 +401,32 @@ func (a *App) persistDirectResults(res []cascade.SendResult, template, source st
 				Error:          r.Error,
 				SentAt:         r.SentAt,
 				MessagePreview: template,
+				BatchID:        r.BatchID,
 			})
-			_ = a.store.Log("INFO", source, fmt.Sprintf("send %s via %s status=%s err=%s", r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error))
+			_ = a.store.Log("INFO", source, fmt.Sprintf("send %s via %s status=%s err=%s batch=%s", r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error, r.BatchID))
 		}
 	}
 	for _, r := range res {
-		a.logFile("INFO", source, fmt.Sprintf("send %s (%s) via %s status=%s err=%s", r.Contact.PhoneRaw, r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error))
+		a.logFile("INFO", source, fmt.Sprintf("send %s (%s) via %s status=%s err=%s batch=%s", r.Contact.PhoneRaw, r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error, r.BatchID))
 	}
-	a.logFile("INFO", source, fmt.Sprintf("batch done (sync) sent=%d total=%d", countSent(res), len(res)))
+	batch := ""
+	if len(res) > 0 {
+		batch = res[0].BatchID
+	}
+	a.logFile("INFO", source, fmt.Sprintf("batch done (sync) batch=%s sent=%d total=%d", batch, countSent(res), len(res)))
 }
 
 func (a *App) startBatchInternal(contacts []cascade.Contact, template string, logSource string, ch cascade.Channel) string {
 	isDirect := ch != cascade.ChannelNone && ch != ""
 	source := logSource
+	batchID := generateBatchID()
+	batchChannel := string(ch)
+	if batchChannel == "" || batchChannel == string(cascade.ChannelNone) {
+		batchChannel = "cascade"
+	}
+	batchCreatedAt := time.Now()
 	sendFn := func(ctx context.Context, onProgress func(cascade.Progress)) []cascade.SendResult {
-		return a.cascadeSvc.SendBatchWithProgress(ctx, contacts, template, onProgress)
+		return a.cascadeSvc.SendBatchWithProgressAndBatch(ctx, contacts, template, batchID, onProgress)
 	}
 	if isDirect {
 		if ch == cascade.ChannelWhatsApp {
@@ -408,7 +440,7 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 			}
 		}
 		sendFn = func(ctx context.Context, onProgress func(cascade.Progress)) []cascade.SendResult {
-			return a.cascadeSvc.SendBatchDirectWithProgress(ctx, contacts, template, ch, onProgress)
+			return a.cascadeSvc.SendBatchDirectWithProgressAndBatch(ctx, contacts, template, ch, batchID, onProgress)
 		}
 	} else {
 		source = "cascade"
@@ -433,12 +465,13 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 	a.cascadeRunning = true
 	a.cascadeMu.Unlock()
 
-	a.logFile("INFO", source, fmt.Sprintf("batch start async total=%d", len(contacts)))
+	a.logFile("INFO", source, fmt.Sprintf("batch start async batch=%s total=%d", batchID, len(contacts)))
 	if a.store != nil {
-		_ = a.store.Log("INFO", source, fmt.Sprintf("batch start async total=%d", len(contacts)))
+		_ = a.store.Log("INFO", source, fmt.Sprintf("batch start async batch=%s total=%d", batchID, len(contacts)))
+		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: batchChannel, MessagePreview: template, CreatedAt: batchCreatedAt, Total: len(contacts)})
 	}
 	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "cascade:start", map[string]interface{}{"total": len(contacts), "channel": string(ch), "mode": source})
+		wailsRuntime.EventsEmit(a.ctx, "cascade:start", map[string]interface{}{"total": len(contacts), "channel": string(ch), "mode": source, "batchId": batchID})
 	}
 
 	go func() {
@@ -455,9 +488,9 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 				wailsRuntime.EventsEmit(a.ctx, "cascade:progress", p)
 			}
 			if p.Status == "checking" {
-				a.logFile("INFO", source, fmt.Sprintf("checking %d/%d %s (%s)", p.Index, p.Total, p.Contact.NormalizedPhone, p.Contact.Name))
+				a.logFile("INFO", source, fmt.Sprintf("checking %d/%d %s (%s) batch=%s", p.Index, p.Total, p.Contact.NormalizedPhone, p.Contact.Name, p.BatchID))
 			} else {
-				a.logFile("INFO", source, fmt.Sprintf("progress %d/%d %s via %s status=%s err=%s eta=%ds", p.Index, p.Total, p.Contact.NormalizedPhone, p.Channel, p.Status, p.Error, p.ETASeconds))
+				a.logFile("INFO", source, fmt.Sprintf("progress %d/%d %s via %s status=%s err=%s eta=%ds batch=%s", p.Index, p.Total, p.Contact.NormalizedPhone, p.Channel, p.Status, p.Error, p.ETASeconds, p.BatchID))
 				if a.store != nil {
 					_ = a.store.AddHistory(storage.HistoryEntry{
 						Phone:          p.Contact.PhoneRaw,
@@ -468,8 +501,9 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 						Error:          p.Error,
 						SentAt:         p.SentAt,
 						MessagePreview: template,
+						BatchID:        p.BatchID,
 					})
-					_ = a.store.Log("INFO", source, fmt.Sprintf("send %s via %s status=%s", p.Contact.NormalizedPhone, p.Channel, p.Status))
+					_ = a.store.Log("INFO", source, fmt.Sprintf("send %s via %s status=%s batch=%s", p.Contact.NormalizedPhone, p.Channel, p.Status, p.BatchID))
 				}
 			}
 		}
@@ -478,14 +512,14 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 
 		cancelled := ctx.Err() != nil
 		if cancelled {
-			a.logFile("WARN", source, fmt.Sprintf("batch cancelled at %d/%d", len(allResults), len(contacts)))
+			a.logFile("WARN", source, fmt.Sprintf("batch cancelled batch=%s at %d/%d", batchID, len(allResults), len(contacts)))
 			if a.store != nil {
-				_ = a.store.Log("WARN", source, fmt.Sprintf("batch cancelled at %d/%d", len(allResults), len(contacts)))
+				_ = a.store.Log("WARN", source, fmt.Sprintf("batch cancelled batch=%s at %d/%d", batchID, len(allResults), len(contacts)))
 			}
 		} else {
-			a.logFile("INFO", source, fmt.Sprintf("batch done async sent=%d failed=%d total=%d", countSent(allResults), len(allResults)-countSent(allResults), len(allResults)))
+			a.logFile("INFO", source, fmt.Sprintf("batch done async batch=%s sent=%d failed=%d total=%d", batchID, countSent(allResults), len(allResults)-countSent(allResults), len(allResults)))
 			if a.store != nil {
-				_ = a.store.Log("INFO", source, fmt.Sprintf("batch done async total=%d", len(allResults)))
+				_ = a.store.Log("INFO", source, fmt.Sprintf("batch done async batch=%s total=%d", batchID, len(allResults)))
 			}
 		}
 		if a.ctx != nil {
@@ -495,6 +529,7 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 				"total":     len(contacts),
 				"channel":   string(ch),
 				"mode":      source,
+				"batchId":   batchID,
 			})
 		}
 	}()
@@ -1174,6 +1209,15 @@ func (a *App) GetHistoryCountFilteredSearch(channel, status, search string) int 
 	}
 	n, _ := a.store.CountHistoryFilteredSearch(channel, status, search)
 	return n
+}
+
+// GetBatches returns recent batches.
+func (a *App) GetBatches(limit int) []storage.Batch {
+	if a.store == nil {
+		return nil
+	}
+	b, _ := a.store.ListBatches(limit)
+	return b
 }
 
 // GetAppLogs returns last N logs.

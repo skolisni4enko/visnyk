@@ -29,6 +29,7 @@ type SendResult struct {
 	Status  string    `json:"status"` // "sent", "skipped", "failed"
 	Error   string    `json:"error"`
 	SentAt  time.Time `json:"sentAt"`
+	BatchID string    `json:"batchId,omitempty"`
 }
 
 // Progress is emitted per contact during cascade.
@@ -41,6 +42,7 @@ type Progress struct {
 	Error      string    `json:"error,omitempty"`
 	SentAt     time.Time `json:"sentAt,omitempty"`
 	ETASeconds int       `json:"etaSeconds,omitempty"`
+	BatchID    string    `json:"batchId,omitempty"`
 }
 
 // Messenger is the interface all messenger services implement.

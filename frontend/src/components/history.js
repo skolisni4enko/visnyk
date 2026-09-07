@@ -171,7 +171,26 @@ function normalizeHistoryEntry(e) {
     status: e.status ?? e.Status ?? '',
     error: e.error ?? e.Error ?? '',
     sentAt: e.sentAt ?? e.SentAt ?? e.sent_at ?? '',
+    batchId: e.batchId ?? e.BatchID ?? e.batch_id ?? '',
+    batchName: e.batchName ?? e.BatchName ?? e.batch_name ?? '',
+    messagePreview: e.messagePreview ?? e.MessagePreview ?? e.message_preview ?? '',
   };
+}
+
+function shortBatchId(b) {
+  if (!b) return '';
+  // 20260907T143022-a3f1 -> 14:30 a3f1
+  const m = String(b).match(/T(\d{2})(\d{2})\d{2}-([a-f0-9]{4})/);
+  if (m) return `${m[1]}:${m[2]} · ${m[3]}`;
+  return String(b).slice(0, 8);
+}
+function batchLabel(e) {
+  if (e.batchId) {
+    const t = formatDate(e.sentAt);
+    const preview = (e.messagePreview || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    return `${shortBatchId(e.batchId)} · ${t}${preview ? ' · ' + escapeHtml(preview) : ''}`;
+  }
+  return '';
 }
 
 // pagination + filter state — server side, best practice
@@ -234,31 +253,75 @@ export function renderHistory(rawList, opts = {}) {
   }
   if (empty) empty.classList.add('hidden');
 
-  // group by date within page
-  let currentDateKey = null;
-  // global start index for numbering (best practice: continuous across pages)
+  // group by batch then date: batch = unit with same batchId (or synthetic legacy), date is outer
   const globalOffset = (curPage - 1) * PAGE_SIZE;
-  let renderedInGroup = 0;
-  let groupStartIdx = 0;
+  let currentDateKey = null;
+  let currentBatchKey = null;
 
-  // precompute groups for header counts
-  const groups = new Map();
+  // precompute counts: date and batch
+  const dateGroups = new Map();
+  const batchGroups = new Map();
+  const batchMeta = new Map(); // batchId -> {first, preview, channel, name}
   list.forEach(h => {
-    const k = formatDateOnly(h.sentAt) || '—';
-    groups.set(k, (groups.get(k) || 0) + 1);
+    const dk = formatDateOnly(h.sentAt) || '—';
+    dateGroups.set(dk, (dateGroups.get(dk) || 0) + 1);
+    const bk = h.batchId || `legacy:${dk}:${(h.messagePreview||'').slice(0,40)}`;
+    batchGroups.set(bk, (batchGroups.get(bk) || 0) + 1);
+    if (!batchMeta.has(bk)) batchMeta.set(bk, { first: h, preview: h.messagePreview || '', channel: h.channel, name: h.batchName || '' });
   });
 
   list.forEach((h, idx) => {
     const dateKey = formatDateOnly(h.sentAt) || '—';
     if (dateKey !== currentDateKey) {
       currentDateKey = dateKey;
-      groupStartIdx = idx;
       const label = dateLabel(h.sentAt);
-      const cnt = groups.get(dateKey) || 0;
+      const cnt = dateGroups.get(dateKey) || 0;
       const trHead = document.createElement('tr');
       trHead.className = 'history-date-header';
       trHead.innerHTML = `<td colspan="8">${escapeHtml(label)}<span class="count">— ${cnt} ${cnt === 1 ? 'відправлення' : 'відправлень'}</span></td>`;
       tbody.appendChild(trHead);
+      currentBatchKey = null; // reset batch within new date
+    }
+    const batchKey = h.batchId || `legacy:${dateKey}:${(h.messagePreview||'').slice(0,40)}`;
+    if (batchKey !== currentBatchKey) {
+      currentBatchKey = batchKey;
+      const meta = batchMeta.get(batchKey);
+      const cnt = batchGroups.get(batchKey) || 0;
+      const isLegacy = !h.batchId;
+      const batchShort = h.batchId ? shortBatchId(h.batchId) : 'legacy';
+      const preview = (meta.preview || '').replace(/\s+/g,' ').trim().slice(0,80);
+      const chBadge = channelBadge(meta.channel);
+      const trBatch = document.createElement('tr');
+      trBatch.className = 'history-batch-header' + (isLegacy ? ' legacy' : '');
+      trBatch.dataset.batch = batchKey;
+      trBatch.title = h.batchId ? `Пачка ${h.batchId}${h.batchName ? ' · ' + h.batchName : ''}` : 'Стара пачка (без batch_id)';
+      const sentInBatch = (() => {
+        let c=0; list.forEach(x => { const k=x.batchId || `legacy:${formatDateOnly(x.sentAt)||'—'}:${(x.messagePreview||'').slice(0,40)}`; if(k===batchKey && x.status==='sent') c++; });
+        return c;
+      })();
+      trBatch.innerHTML = `<td colspan="8" style="background:#f8fafc;border-top:2px solid #e2e8f0;padding:6px 8px;cursor:pointer">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-weight:700;font-size:0.78rem">▾ Пачка ${escapeHtml(batchShort)}</span>
+          ${h.batchName ? `<span class="badge" style="background:#fef9c3;border-color:#fde047;color:#713f12">${escapeHtml(h.batchName)}</span>` : ''}
+          <span class="small mono">${escapeHtml(formatDate(meta.first.sentAt))}</span>
+          <span>${chBadge}</span>
+          <span class="small" style="font-weight:600">— ${cnt} ${cnt===1?'контакт':'контактів'} · <span class="ok">${sentInBatch} sent</span> / <span class="err">${cnt-sentInBatch} fail</span></span>
+          ${isLegacy ? '<span class="small" style="color:#94a3b8">(legacy)</span>' : ''}
+          ${preview ? `<span class="small" title="${escapeHtml(preview)}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-left:1px solid #e2e8f0;padding-left:8px">${escapeHtml(preview)}</span>` : ''}
+          <span class="small mono" style="margin-left:auto;color:#64748b">${escapeHtml(h.batchId ? h.batchId : '')}</span>
+        </div>
+      </td>`;
+      trBatch.addEventListener('click', () => {
+        const collapsed = trBatch.classList.toggle('collapsed');
+        let next = trBatch.nextElementSibling;
+        while (next && !next.classList.contains('history-date-header') && !next.classList.contains('history-batch-header')) {
+          next.style.display = collapsed ? 'none' : '';
+          next = next.nextElementSibling;
+        }
+        const arrow = trBatch.querySelector('span');
+        if (arrow) arrow.textContent = (collapsed ? '▸' : '▾') + ' Пачка ' + batchShort;
+      });
+      tbody.appendChild(trBatch);
     }
     const phoneDisplay = h.phone || h.normalized || '';
     const normTitle = h.normalized || '';
@@ -266,6 +329,7 @@ export function renderHistory(rawList, opts = {}) {
     const tr = document.createElement('tr');
     tr.dataset.phone = phoneDisplay;
     tr.dataset.id = String(h.id);
+    tr.dataset.batch = batchKey;
     tr.title = 'Клік — копіювати номер';
     const globalIdx = globalOffset + idx + 1;
     tr.innerHTML = `

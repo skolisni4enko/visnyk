@@ -92,30 +92,55 @@ func (s *Service) SendBatch(ctx context.Context, contacts []Contact, template st
 	return s.SendBatchWithProgress(ctx, contacts, template, nil)
 }
 
+// SendBatchWithBatch is batch-aware wrapper.
+func (s *Service) SendBatchWithBatch(ctx context.Context, contacts []Contact, template, batchID string) []SendResult {
+	return s.SendBatchWithProgressAndBatch(ctx, contacts, template, batchID, nil)
+}
+
 // SendBatchDirect sends only via the specified channel (no cascade fallback).
 // If contact is not available on that channel or send fails, result is failed with channel-specific error.
 func (s *Service) SendBatchDirect(ctx context.Context, contacts []Contact, template string, ch Channel) []SendResult {
 	return s.SendBatchDirectWithProgress(ctx, contacts, template, ch, nil)
 }
 
+// SendBatchDirectWithBatch is batch-aware wrapper.
+func (s *Service) SendBatchDirectWithBatch(ctx context.Context, contacts []Contact, template string, ch Channel, batchID string) []SendResult {
+	return s.SendBatchDirectWithProgressAndBatch(ctx, contacts, template, ch, batchID, nil)
+}
+
 // SendBatchDirectWithProgress is like SendBatchDirect but emits progress per contact.
-// Unlike the broadcast batch it keeps the inter-contact sleep: a single
-// channel has no parallel sibling, so paceChannel alone would only space
-// the sends that actually happen (skips would collapse the spacing).
-// For Telegram with >=10 contacts it uses the batch path (import all in
-// chunks, send to all, delete all) to avoid per-contact "Test" pollution
-// and to reduce API calls. All logs are English only.
 func (s *Service) SendBatchDirectWithProgress(ctx context.Context, contacts []Contact, template string, ch Channel, onProgress func(Progress)) []SendResult {
+	return s.SendBatchDirectWithProgressAndBatch(ctx, contacts, template, ch, "", onProgress)
+}
+
+// SendBatchDirectWithProgressAndBatch is batch-aware variant.
+func (s *Service) SendBatchDirectWithProgressAndBatch(ctx context.Context, contacts []Contact, template string, ch Channel, batchID string, onProgress func(Progress)) []SendResult {
+	// wrap progress to tag batchID
+	wrappedProgress := onProgress
+	if onProgress != nil && batchID != "" {
+		wrappedProgress = func(p Progress) {
+			p.BatchID = batchID
+			onProgress(p)
+		}
+	}
 	// Hybrid batch path for Telegram: batch import (20 per chunk, 5s pacing),
 	// per-contact paced send via paceChannel (8-15s capped at 30s), then
 	// batch delete (50 per chunk). Avoids per-contact "Test" pollution
 	// and respects flood limits.
 	if ch == ChannelTelegram && len(contacts) >= 10 {
 		if bi, ok := s.telegram.(BatchImporter); ok {
-			return s.sendBatchDirectBatchHybrid(ctx, contacts, template, ch, onProgress, bi)
+			res := s.sendBatchDirectBatchHybrid(ctx, contacts, template, ch, wrappedProgress, bi)
+			for i := range res {
+				res[i].BatchID = batchID
+			}
+			return res
 		}
 		if bs, ok := s.telegram.(BatchSender); ok {
-			return s.sendBatchDirectBatch(ctx, contacts, template, ch, onProgress, bs)
+			res := s.sendBatchDirectBatch(ctx, contacts, template, ch, wrappedProgress, bs)
+			for i := range res {
+				res[i].BatchID = batchID
+			}
+			return res
 		}
 	}
 	results := make([]SendResult, 0, len(contacts))
@@ -135,19 +160,18 @@ func (s *Service) SendBatchDirectWithProgress(ctx context.Context, contacts []Co
 				eta = int(time.Duration(total-i-1) * avg / time.Second)
 			}
 		}
-		if onProgress != nil {
-			onProgress(Progress{Index: i + 1, Total: total, Contact: c, Status: "checking", ETASeconds: eta})
+		if wrappedProgress != nil {
+			wrappedProgress(Progress{Index: i + 1, Total: total, Contact: c, Status: "checking", ETASeconds: eta, BatchID: batchID})
 		}
-
 		res := s.sendOneDirect(ctx, c, template, ch)
+		res.BatchID = batchID
 		results = append(results, res)
-
-		if onProgress != nil {
+		if wrappedProgress != nil {
 			st := res.Status
 			if st == "" {
 				st = "failed"
 			}
-			onProgress(Progress{
+			wrappedProgress(Progress{
 				Index:      i + 1,
 				Total:      total,
 				Contact:    c,
@@ -156,9 +180,9 @@ func (s *Service) SendBatchDirectWithProgress(ctx context.Context, contacts []Co
 				Error:      res.Error,
 				SentAt:     res.SentAt,
 				ETASeconds: eta,
+				BatchID:    batchID,
 			})
 		}
-
 		if i < len(contacts)-1 && !s.channelDead(ch) {
 			delay := s.interContactDelay()
 			select {
@@ -367,6 +391,11 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 // No inter-contact sleep here: pacing is enforced per-channel by paceChannel
 // inside sendViaChannel, otherwise contacts would pay the delay twice.
 func (s *Service) SendBatchWithProgress(ctx context.Context, contacts []Contact, template string, onProgress func(Progress)) []SendResult {
+	return s.SendBatchWithProgressAndBatch(ctx, contacts, template, "", onProgress)
+}
+
+// SendBatchWithProgressAndBatch is batch-aware variant that tags results/progress with batchID.
+func (s *Service) SendBatchWithProgressAndBatch(ctx context.Context, contacts []Contact, template, batchID string, onProgress func(Progress)) []SendResult {
 	results := make([]SendResult, 0, len(contacts))
 	total := len(contacts)
 	s.resetDead()
@@ -376,7 +405,6 @@ func (s *Service) SendBatchWithProgress(ctx context.Context, contacts []Contact,
 			return results
 		default:
 		}
-		// ETA: avg 11.5s per remaining
 		eta := 0
 		if total > i+1 {
 			eta = int(time.Duration(total-i-1) * 11 * time.Second / time.Second)
@@ -386,12 +414,11 @@ func (s *Service) SendBatchWithProgress(ctx context.Context, contacts []Contact,
 			}
 		}
 		if onProgress != nil {
-			onProgress(Progress{Index: i + 1, Total: total, Contact: c, Status: "checking", ETASeconds: eta})
+			onProgress(Progress{Index: i + 1, Total: total, Contact: c, Status: "checking", ETASeconds: eta, BatchID: batchID})
 		}
-
 		res := s.sendOneCtx(ctx, c, template)
+		res.BatchID = batchID
 		results = append(results, res)
-
 		if onProgress != nil {
 			st := res.Status
 			if st == "" {
@@ -406,6 +433,7 @@ func (s *Service) SendBatchWithProgress(ctx context.Context, contacts []Contact,
 				Error:      res.Error,
 				SentAt:     res.SentAt,
 				ETASeconds: eta,
+				BatchID:    batchID,
 			})
 		}
 	}

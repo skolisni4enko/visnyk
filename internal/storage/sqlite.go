@@ -90,6 +90,15 @@ func (s *Store) migrate() error {
 			msg TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_ts ON app_logs(ts)`,
+		`CREATE TABLE IF NOT EXISTS batches(
+			id TEXT PRIMARY KEY,
+			name TEXT,
+			channel TEXT NOT NULL,
+			message_preview TEXT,
+			created_at DATETIME NOT NULL,
+			total INT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_batches_created ON batches(created_at)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -98,6 +107,11 @@ func (s *Store) migrate() error {
 	}
 	// migrate: add name column if missing (for existing DBs)
 	_, _ = s.db.Exec(`ALTER TABLE history ADD COLUMN name TEXT`)
+	// batch grouping
+	_, _ = s.db.Exec(`ALTER TABLE history ADD COLUMN batch_id TEXT`)
+	_, _ = s.db.Exec(`ALTER TABLE history ADD COLUMN batch_name TEXT`)
+	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_history_batch ON history(batch_id)`)
+	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_history_batch_sent ON history(batch_id, sent_at)`)
 	// ensure sent_at index exists for new sorting
 	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_history_sent ON history(sent_at)`)
 	return nil
@@ -171,9 +185,52 @@ func (s *Store) AddHistory(e HistoryEntry) error {
 	if len(preview) > 200 {
 		preview = preview[:200]
 	}
-	_, err := s.db.Exec(`INSERT INTO history(phone,normalized,name,channel,status,error,sent_at,message_preview) VALUES(?,?,?,?,?,?,?,?)`,
-		e.Phone, e.Normalized, e.Name, e.Channel, e.Status, e.Error, e.SentAt.UTC().Format(time.RFC3339Nano), preview)
+	batchID := e.BatchID
+	batchName := e.BatchName
+	if len(batchName) > 100 {
+		batchName = batchName[:100]
+	}
+	_, err := s.db.Exec(`INSERT INTO history(phone,normalized,name,channel,status,error,sent_at,message_preview,batch_id,batch_name) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		e.Phone, e.Normalized, e.Name, e.Channel, e.Status, e.Error, e.SentAt.UTC().Format(time.RFC3339Nano), preview, batchID, batchName)
 	return err
+}
+
+// CreateBatch inserts batch meta.
+func (s *Store) CreateBatch(b Batch) error {
+	preview := b.MessagePreview
+	if len(preview) > 200 {
+		preview = preview[:200]
+	}
+	name := b.Name
+	if len(name) > 100 {
+		name = name[:100]
+	}
+	_, err := s.db.Exec(`INSERT INTO batches(id,name,channel,message_preview,created_at,total) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, channel=excluded.channel, message_preview=excluded.message_preview, total=excluded.total`,
+		b.ID, name, b.Channel, preview, b.CreatedAt.UTC().Format(time.RFC3339Nano), b.Total)
+	return err
+}
+
+// ListBatches returns batches newest first.
+func (s *Store) ListBatches(limit int) ([]Batch, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`SELECT id,COALESCE(name,''),channel,COALESCE(message_preview,''),created_at,total FROM batches ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Batch
+	for rows.Next() {
+		var b Batch
+		var ts string
+		if err := rows.Scan(&b.ID, &b.Name, &b.Channel, &b.MessagePreview, &ts, &b.Total); err != nil {
+			return nil, err
+		}
+		b.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 // ListHistory returns last N entries sorted newest first by sent_at.
@@ -192,7 +249,7 @@ func (s *Store) ListHistoryPaged(limit, offset int) ([]HistoryEntry, error) {
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.db.Query(`SELECT id,phone,normalized,COALESCE(name,''),channel,status,COALESCE(error,''),sent_at,COALESCE(message_preview,'') FROM history ORDER BY sent_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
+	rows, err := s.db.Query(`SELECT id,phone,normalized,COALESCE(name,''),channel,status,COALESCE(error,''),sent_at,COALESCE(message_preview,''),COALESCE(batch_id,''),COALESCE(batch_name,'') FROM history ORDER BY sent_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +258,7 @@ func (s *Store) ListHistoryPaged(limit, offset int) ([]HistoryEntry, error) {
 	for rows.Next() {
 		var e HistoryEntry
 		var sentStr string
-		if err := rows.Scan(&e.ID, &e.Phone, &e.Normalized, &e.Name, &e.Channel, &e.Status, &e.Error, &sentStr, &e.MessagePreview); err != nil {
+		if err := rows.Scan(&e.ID, &e.Phone, &e.Normalized, &e.Name, &e.Channel, &e.Status, &e.Error, &sentStr, &e.MessagePreview, &e.BatchID, &e.BatchName); err != nil {
 			return nil, err
 		}
 		e.SentAt, _ = time.Parse(time.RFC3339Nano, sentStr)
@@ -247,7 +304,7 @@ func (s *Store) ListHistoryFilteredSearch(limit, offset int, channel, status, se
 	if len(search) > 100 {
 		search = search[:100]
 	}
-	q := `SELECT id,phone,normalized,COALESCE(name,''),channel,status,COALESCE(error,''),sent_at,COALESCE(message_preview,'') FROM history WHERE 1=1`
+	q := `SELECT id,phone,normalized,COALESCE(name,''),channel,status,COALESCE(error,''),sent_at,COALESCE(message_preview,''),COALESCE(batch_id,''),COALESCE(batch_name,'') FROM history WHERE 1=1`
 	args := []interface{}{}
 	if channel != "" && channel != "all" {
 		// Support broadcast combined channels "whatsapp,telegram" — match if channel contains the filtered one
@@ -262,8 +319,8 @@ func (s *Store) ListHistoryFilteredSearch(limit, offset int, channel, status, se
 		esc := escapeLike(search)
 		like := "%" + esc + "%"
 		// Best practice: search all user-visible fields, case-insensitive via COLLATE NOCASE
-		q += ` AND (phone LIKE ? ESCAPE '\' OR normalized LIKE ? ESCAPE '\' OR COALESCE(name,'') LIKE ? ESCAPE '\' COLLATE NOCASE OR channel LIKE ? ESCAPE '\' COLLATE NOCASE OR status LIKE ? ESCAPE '\' COLLATE NOCASE OR COALESCE(error,'') LIKE ? ESCAPE '\' COLLATE NOCASE OR COALESCE(message_preview,'') LIKE ? ESCAPE '\' COLLATE NOCASE)`
-		args = append(args, like, like, like, like, like, like, like)
+		q += ` AND (phone LIKE ? ESCAPE '\' OR normalized LIKE ? ESCAPE '\' OR COALESCE(name,'') LIKE ? ESCAPE '\' COLLATE NOCASE OR channel LIKE ? ESCAPE '\' COLLATE NOCASE OR status LIKE ? ESCAPE '\' COLLATE NOCASE OR COALESCE(error,'') LIKE ? ESCAPE '\' COLLATE NOCASE OR COALESCE(message_preview,'') LIKE ? ESCAPE '\' COLLATE NOCASE OR COALESCE(batch_id,'') LIKE ? ESCAPE '\' COLLATE NOCASE OR COALESCE(batch_name,'') LIKE ? ESCAPE '\' COLLATE NOCASE)`
+		args = append(args, like, like, like, like, like, like, like, like, like)
 	}
 	q += ` ORDER BY sent_at DESC, id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
@@ -276,7 +333,7 @@ func (s *Store) ListHistoryFilteredSearch(limit, offset int, channel, status, se
 	for rows.Next() {
 		var e HistoryEntry
 		var sentStr string
-		if err := rows.Scan(&e.ID, &e.Phone, &e.Normalized, &e.Name, &e.Channel, &e.Status, &e.Error, &sentStr, &e.MessagePreview); err != nil {
+		if err := rows.Scan(&e.ID, &e.Phone, &e.Normalized, &e.Name, &e.Channel, &e.Status, &e.Error, &sentStr, &e.MessagePreview, &e.BatchID, &e.BatchName); err != nil {
 			return nil, err
 		}
 		e.SentAt, _ = time.Parse(time.RFC3339Nano, sentStr)
@@ -360,7 +417,7 @@ func (s *Store) ListLogs(limit int) ([]LogEntry, error) {
 
 // --- Clear all / Export ---
 
-// ClearAll deletes history, logs, and non-essential settings, vacuums DB.
+// ClearAll deletes history, logs, batches and non-essential settings, vacuums DB.
 // It keeps encrypted api credentials if keepCredentials true.
 func (s *Store) ClearAll(keepCredentials bool) error {
 	tx, err := s.db.Begin()
@@ -369,6 +426,9 @@ func (s *Store) ClearAll(keepCredentials bool) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(`DELETE FROM history`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM batches`); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM app_logs`); err != nil {
@@ -393,9 +453,11 @@ func (s *Store) ClearAll(keepCredentials bool) error {
 // ClearHistoryOnly helper for UI.
 func (s *Store) ClearHistoryOnly() error {
 	_, err := s.db.Exec(`DELETE FROM history`)
-	if err == nil {
-		_, _ = s.db.Exec(`VACUUM`)
+	if err != nil {
+		return err
 	}
+	_, _ = s.db.Exec(`DELETE FROM batches`)
+	_, _ = s.db.Exec(`VACUUM`)
 	return err
 }
 
