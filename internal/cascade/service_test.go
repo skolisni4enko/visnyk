@@ -235,8 +235,8 @@ func TestDirectSenderSkippableNoRetry(t *testing.T) {
 	if tg.calls != 1 {
 		t.Errorf("skippable error must not be retried, got %d calls", tg.calls)
 	}
-	if !contains(results[0].Error, "пропущено") {
-		t.Errorf("want 'пропущено' in error, got %q", results[0].Error)
+	if !contains(results[0].Error, "skipped") {
+		t.Errorf("want 'skipped' in error, got %q", results[0].Error)
 	}
 }
 

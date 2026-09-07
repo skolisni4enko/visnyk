@@ -1,6 +1,9 @@
 package cascade
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Contact is one applicant row from CSV/XLSX.
 type Contact struct {
@@ -53,4 +56,31 @@ type Messenger interface {
 type DirectSender interface {
 	Messenger
 	ResolveAndSend(phone, message string) error
+}
+
+// BatchSender is an optional batch path for Telegram: import all contacts
+// in chunks, send to all resolved users, then delete the temporary
+// contacts in one batch. Avoids per-contact "Test" pollution and
+// reduces API calls from N*2 to ~N/20 imports.
+type BatchSender interface {
+	Messenger
+	// BatchSend imports phones in chunks, sends message to each found user,
+	// and deletes the temporary contacts. Returns per-phone error (nil = sent).
+	BatchSend(ctx context.Context, phones []string, message string) (map[string]error, error)
+}
+
+// BatchImporter is the hybrid variant: batch import only, per-contact
+// paced send via paceChannel, then batch delete. This keeps the import
+// benefit (no per-contact "Test") but respects per-message pacing (8-15s
+// capped at 30s) so PEER_FLOOD is avoided.
+type BatchImporter interface {
+	Messenger
+	BatchImport(ctx context.Context, phones []string) (map[string]bool, []ImportedContact, error)
+	BatchDelete(ctx context.Context, toDelete []ImportedContact) error
+}
+
+// ImportedContact is a minimal handle for batch delete, avoids importing tg.
+type ImportedContact struct {
+	UserID     int64
+	AccessHash int64
 }

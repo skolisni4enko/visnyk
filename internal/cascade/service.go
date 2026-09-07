@@ -59,7 +59,7 @@ func New(wa, tg, vb Messenger) *Service {
 }
 
 // SessionLostError is reported for contacts skipped after their channel died.
-const SessionLostError = "сесія втрачена, перелогінься через QR/код"
+const SessionLostError = "session lost, please re-login via QR/code"
 
 // resetDead clears the circuit breaker at batch start.
 func (s *Service) resetDead() {
@@ -102,7 +102,22 @@ func (s *Service) SendBatchDirect(ctx context.Context, contacts []Contact, templ
 // Unlike the broadcast batch it keeps the inter-contact sleep: a single
 // channel has no parallel sibling, so paceChannel alone would only space
 // the sends that actually happen (skips would collapse the spacing).
+// For Telegram with >=10 contacts it uses the batch path (import all in
+// chunks, send to all, delete all) to avoid per-contact "Test" pollution
+// and to reduce API calls. All logs are English only.
 func (s *Service) SendBatchDirectWithProgress(ctx context.Context, contacts []Contact, template string, ch Channel, onProgress func(Progress)) []SendResult {
+	// Hybrid batch path for Telegram: batch import (20 per chunk, 5s pacing),
+	// per-contact paced send via paceChannel (8-15s capped at 30s), then
+	// batch delete (50 per chunk). Avoids per-contact "Test" pollution
+	// and respects flood limits.
+	if ch == ChannelTelegram && len(contacts) >= 10 {
+		if bi, ok := s.telegram.(BatchImporter); ok {
+			return s.sendBatchDirectBatchHybrid(ctx, contacts, template, ch, onProgress, bi)
+		}
+		if bs, ok := s.telegram.(BatchSender); ok {
+			return s.sendBatchDirectBatch(ctx, contacts, template, ch, onProgress, bs)
+		}
+	}
 	results := make([]SendResult, 0, len(contacts))
 	total := len(contacts)
 	s.resetDead()
@@ -153,6 +168,197 @@ func (s *Service) SendBatchDirectWithProgress(ctx context.Context, contacts []Co
 			}
 		}
 	}
+	return results
+}
+
+// sendBatchDirectBatch is the batch path for Telegram direct sends.
+// It imports all contacts in chunks (20 per chunk, 5s pacing), sends to
+// all resolved users, and deletes temporary contacts in batches (50 per
+// delete chunk). This avoids per-contact "Test" pollution.
+func (s *Service) sendBatchDirectBatch(ctx context.Context, contacts []Contact, template string, ch Channel, onProgress func(Progress), bs BatchSender) []SendResult {
+	total := len(contacts)
+	s.resetDead()
+	// Emit checking for all contacts upfront (UI shows progress)
+	if onProgress != nil {
+		for i, c := range contacts {
+			eta := int(time.Duration(total-i) * 8 * time.Second / time.Second)
+			onProgress(Progress{Index: i + 1, Total: total, Contact: c, Status: "checking", ETASeconds: eta})
+		}
+	}
+	if s.channelDead(ch) {
+		results := make([]SendResult, 0, len(contacts))
+		for _, c := range contacts {
+			results = append(results, SendResult{Contact: c, Channel: ch, Status: "failed", Error: string(ch) + ": " + SessionLostError, SentAt: time.Now()})
+		}
+		return results
+	}
+	phones := make([]string, 0, len(contacts))
+	for _, c := range contacts {
+		phones = append(phones, c.NormalizedPhone)
+	}
+	perPhoneErr, err := bs.BatchSend(ctx, phones, template)
+	if err != nil {
+		if common.IsTelegramAuthError(err) {
+			s.markDead(ch)
+			errStr := string(ch) + ": " + SessionLostError + " (" + err.Error() + ")"
+			results := make([]SendResult, 0, len(contacts))
+			for i, c := range contacts {
+				eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
+				res := SendResult{Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: time.Now()}
+				results = append(results, res)
+				if onProgress != nil {
+					onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: res.SentAt, ETASeconds: eta})
+				}
+			}
+			return results
+		}
+		// global batch error (e.g., context canceled) — fail all
+		results := make([]SendResult, 0, len(contacts))
+		for i, c := range contacts {
+			eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
+			errStr := "batch failed: " + err.Error()
+			res := SendResult{Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: time.Now()}
+			results = append(results, res)
+			if onProgress != nil {
+				onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: res.SentAt, ETASeconds: eta})
+			}
+		}
+		return results
+	}
+	results := make([]SendResult, 0, len(contacts))
+	for i, c := range contacts {
+		eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
+		perr := perPhoneErr[c.NormalizedPhone]
+		var res SendResult
+		if perr != nil {
+			// per-phone error already contains "skipped: " or "failed to send: " prefix from BatchSend
+			res = SendResult{Contact: c, Channel: ch, Status: "failed", Error: perr.Error(), SentAt: time.Now()}
+		} else {
+			res = SendResult{Contact: c, Channel: ch, Status: "sent", SentAt: time.Now()}
+		}
+		results = append(results, res)
+		if onProgress != nil {
+			st := res.Status
+			onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: st, Error: res.Error, SentAt: res.SentAt, ETASeconds: eta})
+		}
+	}
+	return results
+}
+
+// sendBatchDirectBatchHybrid is the hybrid variant: batch import, per-contact
+// paced send, batch delete. Keeps the import benefit (no per-contact
+// ImportContacts) but sends each message with per-channel pacing
+// (paceChannel 8-15s capped at 30s) to avoid PEER_FLOOD.
+func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Contact, template string, ch Channel, onProgress func(Progress), bi BatchImporter) []SendResult {
+	total := len(contacts)
+	s.resetDead()
+	if onProgress != nil {
+		for i, c := range contacts {
+			eta := int(time.Duration(total-i) * 8 * time.Second / time.Second)
+			onProgress(Progress{Index: i + 1, Total: total, Contact: c, Status: "checking", ETASeconds: eta})
+		}
+	}
+	if s.channelDead(ch) {
+		results := make([]SendResult, 0, len(contacts))
+		for _, c := range contacts {
+			results = append(results, SendResult{Contact: c, Channel: ch, Status: "failed", Error: string(ch) + ": " + SessionLostError, SentAt: time.Now()})
+		}
+		return results
+	}
+	phones := make([]string, 0, len(contacts))
+	for _, c := range contacts {
+		phones = append(phones, c.NormalizedPhone)
+	}
+	// Batch import all contacts
+	found, toDelete, err := bi.BatchImport(ctx, phones)
+	if err != nil {
+		if common.IsTelegramAuthError(err) {
+			s.markDead(ch)
+			errStr := string(ch) + ": " + SessionLostError + " (" + err.Error() + ")"
+			results := make([]SendResult, 0, len(contacts))
+			for i, c := range contacts {
+				eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
+				res := SendResult{Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: time.Now()}
+				results = append(results, res)
+				if onProgress != nil {
+					onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: res.SentAt, ETASeconds: eta})
+				}
+			}
+			return results
+		}
+		// batch import failed globally
+		results := make([]SendResult, 0, len(contacts))
+		for i, c := range contacts {
+			eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
+			errStr := "batch import failed: " + err.Error()
+			res := SendResult{Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: time.Now()}
+			results = append(results, res)
+			if onProgress != nil {
+				onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: res.SentAt, ETASeconds: eta})
+			}
+		}
+		return results
+	}
+	// Per-contact paced send
+	m := s.messengerFor(ch)
+	if m == nil {
+		results := make([]SendResult, 0, len(contacts))
+		for _, c := range contacts {
+			results = append(results, SendResult{Contact: c, Channel: ch, Status: "failed", Error: "messenger " + string(ch) + " not initialized", SentAt: time.Now()})
+		}
+		// cleanup batch import
+		_ = bi.BatchDelete(context.Background(), toDelete)
+		return results
+	}
+	results := make([]SendResult, 0, len(contacts))
+	for i, c := range contacts {
+		select {
+		case <-ctx.Done():
+			// batch delete for already imported contacts
+			_ = bi.BatchDelete(context.Background(), toDelete)
+			return results
+		default:
+		}
+		eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
+		if !found[c.NormalizedPhone] {
+			res := SendResult{Contact: c, Channel: ch, Status: "failed", Error: "user not found for " + c.NormalizedPhone, SentAt: time.Now()}
+			results = append(results, res)
+			if onProgress != nil {
+				onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: "failed", Error: res.Error, SentAt: res.SentAt, ETASeconds: eta})
+			}
+			continue
+		}
+		if s.channelDead(ch) {
+			res := SendResult{Contact: c, Channel: ch, Status: "failed", Error: string(ch) + ": " + SessionLostError, SentAt: time.Now()}
+			results = append(results, res)
+			if onProgress != nil {
+				onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: "failed", Error: res.Error, SentAt: res.SentAt, ETASeconds: eta})
+			}
+			continue
+		}
+		sent, errStr, sentAt := s.sendViaChannel(ctx, m, c.NormalizedPhone, template)
+		var res SendResult
+		if !sent {
+			if errStr == "" {
+				errStr = "contact not found in " + string(ch)
+			}
+			res = SendResult{Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: time.Now()}
+		} else {
+			res = SendResult{Contact: c, Channel: ch, Status: "sent", SentAt: sentAt}
+			if errStr != "" {
+				res.Error = errStr
+			}
+		}
+		results = append(results, res)
+		if onProgress != nil {
+			st := res.Status
+			onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: st, Error: res.Error, SentAt: res.SentAt, ETASeconds: eta})
+		}
+	}
+	// Batch delete imported contacts in background
+	go func() {
+		_ = bi.BatchDelete(context.Background(), toDelete)
+	}()
 	return results
 }
 
@@ -243,7 +449,7 @@ func (s *Service) sendOneCtx(ctx context.Context, c Contact, tmpl string) SendRe
 	}
 	wg.Wait()
 	if len(sentChannels) == 0 {
-		errStr := "жоден месенджер не доступний"
+		errStr := "no messenger available"
 		if len(errs) > 0 {
 			errStr = joinErrors(errs)
 		}
@@ -351,11 +557,11 @@ func (s *Service) sendViaChannel(ctx context.Context, m Messenger, phone, msg st
 				} else {
 					s.noteFlood(m.Name(), false)
 				}
-				return false, channelLabel(m.Name()) + ": перевірка не вдалася: " + err.Error(), time.Time{}
+				return false, channelLabel(m.Name()) + ": check failed: " + err.Error(), time.Time{}
 			}
 			s.noteFlood(m.Name(), false)
 		} else {
-			return false, channelLabel(m.Name()) + ": перевірка не вдалася: " + err.Error(), time.Time{}
+			return false, channelLabel(m.Name()) + ": check failed: " + err.Error(), time.Time{}
 		}
 	}
 	if !ok {
@@ -466,9 +672,9 @@ func (s *Service) resetFlood(ch Channel) {
 func sendErrText(ch Channel, err error) string {
 	_ = ch
 	if common.IsTelegramSkippable(err) {
-		return "пропущено: " + err.Error()
+		return "skipped: " + err.Error()
 	}
-	return "не вдалося відправити: " + err.Error()
+	return "failed to send: " + err.Error()
 }
 
 // sortedCopy returns a sorted copy so merged channel lists are deterministic
@@ -530,7 +736,7 @@ func channelLabel(ch Channel) string {
 func (s *Service) sendOneDirect(ctx context.Context, c Contact, tmpl string, ch Channel) SendResult {
 	m := s.messengerFor(ch)
 	if m == nil {
-		return SendResult{Contact: c, Channel: ch, Status: "failed", Error: "месенджер " + channelLabel(ch) + " не ініціалізовано", SentAt: time.Now()}
+		return SendResult{Contact: c, Channel: ch, Status: "failed", Error: "messenger " + channelLabel(ch) + " not initialized", SentAt: time.Now()}
 	}
 	if s.channelDead(ch) {
 		return SendResult{Contact: c, Channel: ch, Status: "failed", Error: channelLabel(ch) + ": " + SessionLostError, SentAt: time.Now()}
@@ -538,7 +744,7 @@ func (s *Service) sendOneDirect(ctx context.Context, c Contact, tmpl string, ch 
 	sent, errStr, sentAt := s.sendViaChannel(ctx, m, c.NormalizedPhone, tmpl)
 	if !sent {
 		if errStr == "" {
-			errStr = "контакт відсутній у " + channelLabel(ch)
+			errStr = "contact not found in " + channelLabel(ch)
 		}
 		return SendResult{Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: time.Now()}
 	}

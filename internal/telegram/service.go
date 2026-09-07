@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -478,7 +479,7 @@ func (s *Service) Connect(ctx context.Context, phone string) error {
 				lower := strings.ToLower(err.Error())
 				if strings.Contains(lower, "invalid password") || strings.Contains(lower, "password") && strings.Contains(err.Error(), "401") {
 					s.mu.Lock()
-					s.lastErr = "невірний пароль — спробуйте ще раз: " + err.Error()
+					s.lastErr = "invalid password — try again: " + err.Error()
 					s.pwdNeeded = true
 					s.mu.Unlock()
 					fmt.Printf("[telegram] auth failed (need retry): %v\n", err)
@@ -515,7 +516,7 @@ func (s *Service) Connect(ctx context.Context, phone string) error {
 							lower2 := strings.ToLower(err2.Error())
 							if strings.Contains(lower2, "invalid password") || strings.Contains(err2.Error(), "401") || strings.Contains(err2.Error(), "PASSWORD") {
 								s.mu.Lock()
-								s.lastErr = "невірний пароль — спробуйте ще раз: " + err2.Error()
+								s.lastErr = "invalid password — try again: " + err2.Error()
 								s.pwdNeeded = true
 								s.mu.Unlock()
 								fmt.Printf("[telegram] retry password failed (invalid): %v\n", err2)
@@ -705,9 +706,9 @@ func (s *Service) ConnectQR(ctx context.Context) error {
 					for {
 						s.mu.Lock()
 						s.pwdNeeded = true
-						if s.lastErr == "" || !strings.Contains(s.lastErr, "невірний пароль") {
+						if s.lastErr == "" || !strings.Contains(s.lastErr, "invalid password") {
 							s.lastErr = "2FA password required (QR)"
-							s.qrErr = "2FA password required — введіть хмарний пароль нижче"
+							s.qrErr = "2FA password required — enter cloud password below"
 						}
 						s.mu.Unlock()
 						fmt.Printf("[telegram] QR 2FA password requested — waiting for user input\n")
@@ -733,8 +734,8 @@ func (s *Service) ConnectQR(ctx context.Context) error {
 							lower := strings.ToLower(err.Error())
 							if strings.Contains(lower, "invalid password") || strings.Contains(err.Error(), "PASSWORD") || strings.Contains(err.Error(), "401") {
 								s.mu.Lock()
-								s.lastErr = "невірний пароль — спробуйте ще раз: " + err.Error()
-								s.qrErr = "невірний пароль — спробуйте ще раз"
+								s.lastErr = "invalid password — try again: " + err.Error()
+								s.qrErr = "invalid password — try again"
 								s.pwdNeeded = true
 								s.mu.Unlock()
 								fmt.Printf("[telegram] QR password failed (invalid, retry): %v\n", err)
@@ -1059,6 +1060,402 @@ func (s *Service) sendToPeer(ctx context.Context, client *telegram.Client, input
 	}
 	if err != nil {
 		return fmt.Errorf("send: %w", err)
+	}
+	return nil
+}
+
+// BatchSend imports phones in chunks, sends message to each found user,
+// and deletes temporary contacts in batches. This avoids per-contact "Test"
+// pollution and reduces API calls from N*2 to ~N/20 imports.
+// Phones must be E.164 (+380...). Returns per-phone error (nil = sent).
+// All logs are English only.
+func (s *Service) BatchSend(ctx context.Context, phones []string, msgText string) (map[string]error, error) {
+	s.mu.Lock()
+	client := s.client
+	connected := s.connected && s.loggedIn
+	s.mu.Unlock()
+	if !connected || client == nil {
+		return nil, fmt.Errorf("telegram not connected/logged in")
+	}
+	// Normalize and dedup
+	normPhones := make([]string, 0, len(phones))
+	seen := make(map[string]bool, len(phones))
+	for _, p := range phones {
+		n := normalizePhone(p)
+		if n == "" {
+			continue
+		}
+		if !seen[n] {
+			seen[n] = true
+			normPhones = append(normPhones, n)
+		}
+	}
+	if len(normPhones) == 0 {
+		return make(map[string]error), nil
+	}
+
+	const importChunk = 20
+	const deleteChunk = 50
+
+	phoneToUser := make(map[string]*tg.User, len(normPhones))
+	var toDelete []tg.InputUserClass
+	importedIDs := make(map[int64]bool)
+
+	// --- Batch import in chunks ---
+	for i := 0; i < len(normPhones); i += importChunk {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		end := i + importChunk
+		if end > len(normPhones) {
+			end = len(normPhones)
+		}
+		chunk := normPhones[i:end]
+		contacts := make([]tg.InputPhoneContact, 0, len(chunk))
+		for _, ph := range chunk {
+			name := ph
+			if len(name) > 20 {
+				name = name[len(name)-10:]
+			}
+			contacts = append(contacts, tg.InputPhoneContact{Phone: ph, FirstName: name, LastName: ""})
+		}
+		// pacing between chunks (avoid flood)
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5*time.Second + time.Duration(rand.Int63n(2000))*time.Millisecond):
+			}
+		}
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		res, err := client.API().ContactsImportContacts(cctx, contacts)
+		cancel()
+		if err != nil {
+			if d, ok := common.FloodWaitDuration(err); ok {
+				wait := d + 2*time.Second + time.Duration(rand.Int63n(int64(3*time.Second)))
+				fmt.Printf("[telegram] BatchImport flood wait %v chunk %d-%d\n", wait, i, end)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(wait):
+				}
+				cctx2, cancel2 := context.WithTimeout(ctx, 20*time.Second)
+				res, err = client.API().ContactsImportContacts(cctx2, contacts)
+				cancel2()
+			}
+			if err != nil {
+				if common.IsTelegramAuthError(err) {
+					return nil, fmt.Errorf("batch import auth error: %w", err)
+				}
+				fmt.Printf("[telegram] BatchImport chunk %d-%d failed: %v\n", i, end, err)
+				// mark all phones in chunk as failed (will be reported as not found)
+				continue
+			}
+		}
+		// Map users by phone for this chunk
+		chunkUsers := make(map[string]*tg.User)
+		for _, u := range res.Users {
+			if usr, ok := u.(*tg.User); ok {
+				ph := normalizePhone(usr.Phone)
+				if ph != "" {
+					chunkUsers[ph] = usr
+				} else {
+					// fallback: assign to first unmatched phone in chunk
+					for _, cp := range chunk {
+						if _, exists := chunkUsers[cp]; !exists && phoneToUser[cp] == nil {
+							// check if this user corresponds to cp via Imported mapping
+							for _, ic := range res.Imported {
+								if ic.UserID == usr.ID {
+									chunkUsers[cp] = usr
+									break
+								}
+							}
+							if chunkUsers[cp] != nil {
+								break
+							}
+						}
+					}
+					// last resort: append to any unmatched
+					if len(chunkUsers) < len(chunk) {
+						for _, cp := range chunk {
+							if _, ok := chunkUsers[cp]; !ok && phoneToUser[cp] == nil {
+								chunkUsers[cp] = usr
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+		for ph, usr := range chunkUsers {
+			phoneToUser[ph] = usr
+		}
+		for _, ic := range res.Imported {
+			if !importedIDs[ic.UserID] {
+				importedIDs[ic.UserID] = true
+				// find AccessHash from Users
+				for _, u := range res.Users {
+					if usr, ok := u.(*tg.User); ok && usr.ID == ic.UserID {
+						toDelete = append(toDelete, &tg.InputUser{UserID: usr.ID, AccessHash: usr.AccessHash})
+						break
+					}
+				}
+			}
+		}
+		fmt.Printf("[telegram] BatchImport chunk %d-%d ok users=%d imported=%d\n", i, end, len(res.Users), len(res.Imported))
+	}
+
+	// --- Send to each resolved user ---
+	results := make(map[string]error, len(normPhones))
+	for _, ph := range normPhones {
+		select {
+		case <-ctx.Done():
+			return results, ctx.Err()
+		default:
+		}
+		usr, ok := phoneToUser[ph]
+		if !ok || usr == nil {
+			results[ph] = fmt.Errorf("user not found for %s", ph)
+			continue
+		}
+		peer := &tg.InputPeerUser{UserID: usr.ID, AccessHash: usr.AccessHash}
+		sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := s.sendToPeer(sctx, client, peer, msgText)
+		cancel()
+		if err != nil {
+			if d, ok := common.FloodWaitDuration(err); ok {
+				wait := d + 2*time.Second + time.Duration(rand.Int63n(int64(3*time.Second)))
+				fmt.Printf("[telegram] BatchSend flood wait %v for %s\n", wait, ph)
+				select {
+				case <-ctx.Done():
+					results[ph] = ctx.Err()
+					continue
+				case <-time.After(wait):
+				}
+				sctx2, cancel2 := context.WithTimeout(ctx, 15*time.Second)
+				err = s.sendToPeer(sctx2, client, peer, msgText)
+				cancel2()
+			}
+			if err != nil {
+				if common.IsTelegramSkippable(err) {
+					results[ph] = fmt.Errorf("skipped: %w", err)
+				} else {
+					results[ph] = fmt.Errorf("failed to send: %w", err)
+				}
+				continue
+			}
+		}
+		results[ph] = nil
+		// per-message pacing for batch sends (8-15s, capped at 30s)
+		select {
+		case <-ctx.Done():
+			break
+		case <-time.After(8*time.Second + time.Duration(rand.Int63n(int64(7*time.Second)))):
+		}
+	}
+
+	// --- Batch delete imported contacts ---
+	if len(toDelete) > 0 {
+		go func(ids []tg.InputUserClass) {
+			for i := 0; i < len(ids); i += deleteChunk {
+				end := i + deleteChunk
+				if end > len(ids) {
+					end = len(ids)
+				}
+				chunk := ids[i:end]
+				cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				s.mu.Lock()
+				cl := s.client
+				ok := s.connected && s.loggedIn
+				s.mu.Unlock()
+				if !ok || cl == nil {
+					cancel()
+					return
+				}
+				if _, err := cl.API().ContactsDeleteContacts(cctx, chunk); err != nil {
+					fmt.Printf("[telegram] BatchDelete chunk %d-%d failed: %v\n", i, end, err)
+				} else {
+					fmt.Printf("[telegram] BatchDelete chunk %d-%d ok users=%d\n", i, end, len(chunk))
+				}
+				cancel()
+				if end < len(ids) {
+					time.Sleep(1 * time.Second)
+				}
+			}
+		}(toDelete)
+	}
+
+	return results, nil
+}
+
+// BatchImport imports phones in chunks (20 per chunk, 5s pacing between
+// chunks) and returns a map of found phones and a list of imported contacts
+// for batch delete. All logs are English only.
+func (s *Service) BatchImport(ctx context.Context, phones []string) (map[string]bool, []cascade.ImportedContact, error) {
+	s.mu.Lock()
+	client := s.client
+	connected := s.connected && s.loggedIn
+	s.mu.Unlock()
+	if !connected || client == nil {
+		return nil, nil, fmt.Errorf("telegram not connected/logged in")
+	}
+	normPhones := make([]string, 0, len(phones))
+	seen := make(map[string]bool, len(phones))
+	for _, p := range phones {
+		n := normalizePhone(p)
+		if n == "" {
+			continue
+		}
+		if !seen[n] {
+			seen[n] = true
+			normPhones = append(normPhones, n)
+		}
+	}
+	if len(normPhones) == 0 {
+		return make(map[string]bool), nil, nil
+	}
+	const importChunk = 20
+	found := make(map[string]bool, len(normPhones))
+	var toDelete []cascade.ImportedContact
+	importedIDs := make(map[int64]bool)
+	for i := 0; i < len(normPhones); i += importChunk {
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		default:
+		}
+		end := i + importChunk
+		if end > len(normPhones) {
+			end = len(normPhones)
+		}
+		chunk := normPhones[i:end]
+		contacts := make([]tg.InputPhoneContact, 0, len(chunk))
+		for _, ph := range chunk {
+			name := ph
+			if len(name) > 20 {
+				name = name[len(name)-10:]
+			}
+			contacts = append(contacts, tg.InputPhoneContact{Phone: ph, FirstName: name, LastName: ""})
+		}
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case <-time.After(5*time.Second + time.Duration(rand.Int63n(2000))*time.Millisecond):
+			}
+		}
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		res, err := client.API().ContactsImportContacts(cctx, contacts)
+		cancel()
+		if err != nil {
+			if d, ok := common.FloodWaitDuration(err); ok {
+				wait := d + 2*time.Second + time.Duration(rand.Int63n(int64(3*time.Second)))
+				fmt.Printf("[telegram] BatchImport flood wait %v chunk %d-%d\n", wait, i, end)
+				select {
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				case <-time.After(wait):
+				}
+				cctx2, cancel2 := context.WithTimeout(ctx, 20*time.Second)
+				res, err = client.API().ContactsImportContacts(cctx2, contacts)
+				cancel2()
+			}
+			if err != nil {
+				if common.IsTelegramAuthError(err) {
+					return nil, nil, fmt.Errorf("batch import auth error: %w", err)
+				}
+				fmt.Printf("[telegram] BatchImport chunk %d-%d failed: %v\n", i, end, err)
+				continue
+			}
+		}
+		// Mark found phones
+		for _, u := range res.Users {
+			if usr, ok := u.(*tg.User); ok {
+				ph := normalizePhone(usr.Phone)
+				if ph != "" && seen[ph] {
+					found[ph] = true
+				}
+			}
+		}
+		// Fallback: if Phone empty, assume chunk phones that are imported are found
+		if len(found) < len(chunk) {
+			// Use res.Imported to mark those that were newly imported as found
+			for _, ic := range res.Imported {
+				for _, u := range res.Users {
+					if usr, ok := u.(*tg.User); ok && usr.ID == ic.UserID {
+						// find corresponding chunk phone not yet marked
+						for _, cp := range chunk {
+							if !found[cp] {
+								// heuristic: mark first unmatched as found for this user
+								found[cp] = true
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+		for _, ic := range res.Imported {
+			if !importedIDs[ic.UserID] {
+				importedIDs[ic.UserID] = true
+				for _, u := range res.Users {
+					if usr, ok := u.(*tg.User); ok && usr.ID == ic.UserID {
+						toDelete = append(toDelete, cascade.ImportedContact{UserID: usr.ID, AccessHash: usr.AccessHash})
+						break
+					}
+				}
+			}
+		}
+		fmt.Printf("[telegram] BatchImport chunk %d-%d ok users=%d imported=%d\n", i, end, len(res.Users), len(res.Imported))
+	}
+	return found, toDelete, nil
+}
+
+// BatchDelete deletes imported contacts in batches (50 per chunk).
+func (s *Service) BatchDelete(ctx context.Context, toDelete []cascade.ImportedContact) error {
+	if len(toDelete) == 0 {
+		return nil
+	}
+	const deleteChunk = 50
+	s.mu.Lock()
+	client := s.client
+	connected := s.connected && s.loggedIn
+	s.mu.Unlock()
+	if !connected || client == nil {
+		return fmt.Errorf("telegram not connected/logged in")
+	}
+	for i := 0; i < len(toDelete); i += deleteChunk {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		end := i + deleteChunk
+		if end > len(toDelete) {
+			end = len(toDelete)
+		}
+		chunk := toDelete[i:end]
+		inputs := make([]tg.InputUserClass, 0, len(chunk))
+		for _, ic := range chunk {
+			inputs = append(inputs, &tg.InputUser{UserID: ic.UserID, AccessHash: ic.AccessHash})
+		}
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		_, err := client.API().ContactsDeleteContacts(cctx, inputs)
+		cancel()
+		if err != nil {
+			fmt.Printf("[telegram] BatchDelete chunk %d-%d failed: %v\n", i, end, err)
+		} else {
+			fmt.Printf("[telegram] BatchDelete chunk %d-%d ok users=%d\n", i, end, len(chunk))
+		}
+		if end < len(toDelete) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(1 * time.Second):
+			}
+		}
 	}
 	return nil
 }
