@@ -58,60 +58,25 @@ type Service struct {
 	lastResolve time.Time
 }
 
-func absPath(p string) string { return common.AbsPath(p) }
-
-var defaultSessionPath = absPath("telegram-store/session.json")
-var configPath = absPath("telegram-store/config.json")
-
-// Paths from installed location (UserConfigDir). Lazy init to allow VISNYK_DATA_DIR override in tests.
-func installedSessionPath() string {
-	// prefer UserConfigDir if available — for installed app
-	if d, err := os.UserConfigDir(); err == nil && d != "" {
-		p := d + "/visnyk/telegram/session.json"
-		// Normalize via filepath
-		if abs, err := filepath.Abs(p); err == nil {
-			return abs
-		}
-		return p
-	}
-	return defaultSessionPath
-}
-
-func installedConfigPath() string {
-	if d, err := os.UserConfigDir(); err == nil && d != "" {
-		p := d + "/visnyk/telegram/config.json"
-		if abs, err := filepath.Abs(p); err == nil {
-			return abs
-		}
-		return p
-	}
-	return configPath
-}
-
 func resolveSessionPath() string {
 	if p := os.Getenv("VISNYK_DATA_DIR"); p != "" {
 		return filepath.Join(p, "telegram", "session.json")
 	}
-	// If legacy exists in cwd, use legacy for migration
-	if _, err := os.Stat(defaultSessionPath); err == nil {
-		if _, err2 := os.Stat(installedSessionPath()); err2 != nil {
-			return defaultSessionPath
-		}
-	}
-	return installedSessionPath()
+	return paths.TelegramSessionPath()
 }
 
 func resolveConfigPath() string {
 	if p := os.Getenv("VISNYK_DATA_DIR"); p != "" {
 		return filepath.Join(p, "telegram", "config.json")
 	}
-	if _, err := os.Stat(configPath); err == nil {
-		if _, err2 := os.Stat(installedConfigPath()); err2 != nil {
-			return configPath
-		}
-	}
-	return installedConfigPath()
+	return paths.TelegramConfigPath()
 }
+
+// kept for backward compat where old code referenced these vars directly
+var defaultSessionPath = paths.TelegramSessionPath()
+var configPath = paths.TelegramConfigPath()
+
+func absPath(p string) string { return common.AbsPath(p) }
 
 // tgConfig persists api_id/hash + phone so user enters once and can switch account.
 // phone is stored to display current account and is removed on Logout/account change.

@@ -21,6 +21,7 @@ import (
 	"visnyk/internal/cascade"
 	"visnyk/internal/common"
 	"visnyk/internal/format"
+	"visnyk/internal/paths"
 )
 
 // Service implements cascade.Messenger for WhatsApp via whatsmeow.
@@ -40,28 +41,11 @@ type Service struct {
 	loggedIn    bool
 }
 
-const defaultDBPath = "whatsapp-store/whatsapp.db"
-
 func whatsappDefaultPath() string {
 	if p := os.Getenv("VISNYK_DATA_DIR"); p != "" {
 		return filepath.Join(p, "whatsapp", "store.db")
 	}
-	if _, err := os.Stat(defaultDBPath); err == nil {
-		// legacy exists, check installed not exists
-		if dir, err2 := os.UserConfigDir(); err2 == nil && dir != "" {
-			installed := filepath.Join(dir, "visnyk", "whatsapp", "store.db")
-			if _, err3 := os.Stat(installed); err3 != nil {
-				if abs, err4 := filepath.Abs(defaultDBPath); err4 == nil {
-					return abs
-				}
-				return defaultDBPath
-			}
-		}
-	}
-	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
-		return filepath.Join(dir, "visnyk", "whatsapp", "store.db")
-	}
-	return defaultDBPath
+	return paths.WhatsAppDBPath()
 }
 
 // New creates a WhatsApp service. dbPath may be empty to use default.
