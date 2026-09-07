@@ -37,7 +37,19 @@ type App struct {
 	cascadeMu      sync.Mutex
 	cascadeCancel  context.CancelFunc
 	cascadeRunning bool
+
+	// health monitor: background session validation with cached status,
+	// so GetConnectionsStatus never blocks the UI thread on network.
+	healthMu       sync.Mutex
+	healthCache    ConnectionsStatus
+	healthAt       time.Time
+	healthInFlight bool
+	healthStop     chan struct{}
+	healthStopOnce sync.Once
 }
+
+// healthInterval is how often the background monitor revalidates sessions.
+const healthInterval = 20 * time.Second
 
 // NewApp creates the Wails app with WhatsApp and Telegram services.
 // dbPath may be empty for default path (uses paths.DataDir).
@@ -103,10 +115,55 @@ func (a *App) Startup(ctx context.Context) {
 			}
 		}
 	}()
+	a.startHealthMonitor()
+}
+
+// startHealthMonitor launches background session validation: an initial
+// check after restore settles, then a ticker. Results are cached —
+// GetConnectionsStatus serves the cache instantly without network.
+func (a *App) startHealthMonitor() {
+	a.healthMu.Lock()
+	if a.healthStop != nil {
+		a.healthMu.Unlock()
+		return
+	}
+	a.healthStop = make(chan struct{})
+	stop := a.healthStop
+	a.healthMu.Unlock()
+
+	go func() {
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		ticker := time.NewTicker(healthInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-timer.C:
+				a.refreshHealth()
+			case <-ticker.C:
+				a.refreshHealth()
+			}
+		}
+	}()
+}
+
+// stopHealthMonitor halts the background ticker (idempotent).
+func (a *App) stopHealthMonitor() {
+	a.healthStopOnce.Do(func() {
+		a.healthMu.Lock()
+		defer a.healthMu.Unlock()
+		if a.healthStop != nil {
+			close(a.healthStop)
+			a.healthStop = nil
+		}
+	})
 }
 
 // Shutdown is called by Wails when the app exits.
 func (a *App) Shutdown(_ context.Context) {
+	a.stopHealthMonitor()
 	// cancel cascade if running
 	a.cascadeMu.Lock()
 	if a.cascadeCancel != nil {
@@ -857,6 +914,134 @@ func (a *App) ParseContactsFile(filename, base64Data string) (contacts.ParseResu
 // PreviewContacts is alias for ParseContactsText for frontend convenience.
 func (a *App) PreviewContacts(raw string) contacts.ParseResult {
 	return contacts.ParseText(raw)
+}
+
+// --- Connection status (background healthcheck) ---
+
+// ChannelStatus is one messenger row for the connections footer.
+type ChannelStatus struct {
+	Connected bool   `json:"connected"`
+	LoggedIn  bool   `json:"loggedIn"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
+// ConnectionsStatus aggregates all messengers for a single UI poll.
+type ConnectionsStatus struct {
+	WhatsApp ChannelStatus `json:"whatsapp"`
+	Telegram ChannelStatus `json:"telegram"`
+	Viber    ChannelStatus `json:"viber"`
+}
+
+// GetConnectionsStatus returns the last background-validated status.
+// Never blocks on network: the health monitor refreshes the cache every
+// healthInterval, this just serves it (or cheap local flags on first run).
+func (a *App) GetConnectionsStatus() ConnectionsStatus {
+	a.healthMu.Lock()
+	cached := a.healthCache
+	at := a.healthAt
+	needRefresh := at.IsZero() && !a.healthInFlight
+	if needRefresh {
+		a.healthInFlight = true
+	}
+	a.healthMu.Unlock()
+	if needRefresh {
+		go func() {
+			a.refreshHealth()
+			a.healthMu.Lock()
+			a.healthInFlight = false
+			a.healthMu.Unlock()
+		}()
+	}
+	if at.IsZero() {
+		return a.snapshotFlags()
+	}
+	return cached
+}
+
+// snapshotFlags builds a status from cheap local flags only (no network).
+func (a *App) snapshotFlags() ConnectionsStatus {
+	var out ConnectionsStatus
+	if a.whatsappSvc != nil {
+		c := a.whatsappSvc.IsConnected()
+		l := a.whatsappSvc.IsLoggedIn()
+		out.WhatsApp = ChannelStatus{Connected: c, LoggedIn: l, OK: c && l}
+	}
+	if a.telegramSvc != nil {
+		c := a.telegramSvc.IsConnected()
+		l := a.telegramSvc.IsLoggedIn()
+		st := ChannelStatus{Connected: c, LoggedIn: l, OK: c && l}
+		if lastErr := a.telegramSvc.GetLastError(); lastErr != "" && !st.OK {
+			st.Error = lastErr
+		}
+		out.Telegram = st
+	}
+	out.Viber = ChannelStatus{Error: "скоро"}
+	return out
+}
+
+// refreshHealth validates every session live (Telegram via server
+// Auth.Status — detects kicked/revoked sessions like 401
+// AUTH_KEY_UNREGISTERED; Viber is a stub) and caches the result.
+// Runs in background; logs only on OK transitions, not every tick.
+func (a *App) refreshHealth() {
+	var out ConnectionsStatus
+	if a.whatsappSvc != nil {
+		c := a.whatsappSvc.IsConnected()
+		l := a.whatsappSvc.IsLoggedIn()
+		out.WhatsApp = ChannelStatus{Connected: c, LoggedIn: l, OK: c && l}
+	}
+	if a.telegramSvc != nil {
+		c := a.telegramSvc.IsConnected()
+		l := a.telegramSvc.IsLoggedIn()
+		st := ChannelStatus{Connected: c, LoggedIn: l, OK: c && l}
+		if c && l {
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			err := a.telegramSvc.CheckSession(ctx)
+			cancel()
+			if err != nil {
+				st = ChannelStatus{Error: err.Error()}
+			}
+		} else if lastErr := a.telegramSvc.GetLastError(); lastErr != "" {
+			st.Error = lastErr
+		}
+		out.Telegram = st
+	}
+	out.Viber = ChannelStatus{Error: "скоро"}
+
+	a.healthMu.Lock()
+	prev := a.healthCache
+	hadPrev := !a.healthAt.IsZero()
+	a.healthCache = out
+	a.healthAt = time.Now()
+	a.healthMu.Unlock()
+
+	if hadPrev {
+		a.logHealthTransition("whatsapp", prev.WhatsApp.OK, out.WhatsApp.OK, out.WhatsApp.Error)
+		a.logHealthTransition("telegram", prev.Telegram.OK, out.Telegram.OK, out.Telegram.Error)
+	}
+}
+
+// logHealthTransition logs session loss/recovery once per transition.
+func (a *App) logHealthTransition(name string, wasOK, nowOK bool, errStr string) {
+	if wasOK == nowOK {
+		return
+	}
+	if nowOK {
+		a.logFile("INFO", "health", fmt.Sprintf("%s session recovered", name))
+		if a.store != nil {
+			_ = a.store.Log("INFO", "health", fmt.Sprintf("%s session recovered", name))
+		}
+		return
+	}
+	msg := fmt.Sprintf("%s session lost", name)
+	if errStr != "" {
+		msg += fmt.Sprintf(": %v", errStr)
+	}
+	a.logFile("WARN", "health", msg)
+	if a.store != nil {
+		_ = a.store.Log("WARN", "health", msg)
+	}
 }
 
 // --- Storage / Logs / Version ---

@@ -46,3 +46,11 @@ type Messenger interface {
 	IsAvailable(phone string) (bool, error)
 	Send(phone, message string) error
 }
+
+// DirectSender is an optional fast path: resolve + send in a single call
+// (e.g. Telegram via contacts.resolvePhone) instead of IsAvailable+Send.
+// sendOne prefers it when the messenger implements it — half the API calls.
+type DirectSender interface {
+	Messenger
+	ResolveAndSend(phone, message string) error
+}
