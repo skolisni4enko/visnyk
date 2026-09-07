@@ -407,7 +407,7 @@ func (s *Store) DeleteHistory(id int64) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("запис %d не знайдено", id)
+		return fmt.Errorf("record %d not found", id)
 	}
 	_, _ = s.db.Exec(`VACUUM`)
 	return nil

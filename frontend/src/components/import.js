@@ -170,15 +170,45 @@ async function parsePaste() {
     const lines = raw.split(/[\n,;\t]+/).map(s => s.trim()).filter(Boolean);
     const fake = lines.slice(0, 100).map((p, i) => ({ Name: '', PhoneRaw: p, NormalizedPhone: p }));
     renderPreview({ contacts: fake, invalid: [], duplicates: 0, total: lines.length });
+    tidyBulkInput({ contacts: fake, invalid: [], duplicates: 0 });
     return;
   }
   el('bulk-parse-stats').textContent = 'Розпізнаємо...';
   try {
     const res = await window.go.ui.App.ParseContactsText(raw);
-    renderPreview(normalizeResult(res));
+    const norm = normalizeResult(res);
+    renderPreview(norm);
+    tidyBulkInput(norm);
   } catch (e) {
     el('bulk-parse-stats').textContent = 'Помилка: ' + String(e);
   }
+}
+
+// tidyBulkInput rewrites the textarea one number per line from the parse
+// result (the parser is the source of truth, so numbers with spaces stay
+// intact). Skipped when duplicates exist — dropped lines can't be restored,
+// so we never silently eat user input. No-op when text already matches
+// (prevents input-event loops with the auto-parse debounce).
+let tidySuppress = false;
+function tidyBulkInput(result) {
+  const input = el('bulk-input');
+  if (!input || !result) return;
+  if ((result.duplicates || 0) > 0) return;
+  const lines = [];
+  (result.contacts || []).forEach(c => { if (c.PhoneRaw) lines.push(c.PhoneRaw); });
+  (result.invalid || []).forEach(inv => { if (inv.Raw) lines.push(inv.Raw); });
+  if (lines.length === 0) return;
+  const next = lines.join('\n');
+  if (input.value === next || input.value === next + '\n') return;
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  tidySuppress = true;
+  input.value = next;
+  try {
+    const pos = Math.min(start ?? next.length, next.length);
+    input.setSelectionRange(pos, Math.min(end ?? pos, next.length));
+  } catch {}
+  setTimeout(() => { tidySuppress = false; }, 0);
 }
 
 async function parseFile(file) {
@@ -256,7 +286,12 @@ export function initBulkImport() {
   });
   // auto-parse on paste with debounce
   let debounce = null;
+  el('bulk-input')?.addEventListener('paste', () => {
+    // let the pasted text land first, then parse+tidy into one column
+    setTimeout(() => parsePaste(), 0);
+  });
   el('bulk-input')?.addEventListener('input', () => {
+    if (tidySuppress) return;
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => {
       const v = el('bulk-input').value.trim();

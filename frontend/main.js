@@ -202,6 +202,29 @@ loadTgConfig();
 refreshTg();
 if(!window._tgInterval) window._tgInterval=setInterval(refreshTg, 2000);
 
+// Background session healthcheck: single backend call validates WA + TG
+// sessions live (detects kicked/revoked TG sessions) and updates the
+// footer. Cheap enough every 10s; backend logs only on transitions.
+async function refreshConnectionsStatus(){
+  if(!isWailsAvailable()) return;
+  try{
+    const st=await window.go.ui.App.GetConnectionsStatus();
+    if(!st) return;
+    const waOk=!!(st.whatsapp && (st.whatsapp.ok ?? (st.whatsapp.connected && st.whatsapp.loggedIn)));
+    const tgOk=!!(st.telegram && (st.telegram.ok ?? (st.telegram.connected && st.telegram.loggedIn)));
+    const viberOk=!!(st.viber && st.viber.ok);
+    updateConnectionsFooter(waOk, tgOk, viberOk);
+    // banner on fresh session errors (e.g. TG kicked the session)
+    const tgErrEl=document.getElementById('tg-error');
+    const tgErr=(st.telegram && st.telegram.error) || '';
+    if(tgErrEl){
+      if(tgErr && !tgOk){ tgErrEl.textContent='Сесія втрачена: '+tgErr+' — перепідключи Telegram'; tgErrEl.classList.remove('hidden'); }
+      else if(!tgErr){ tgErrEl.classList.add('hidden'); }
+    }
+  }catch{}
+}
+if(!window._connHealthInterval) window._connHealthInterval=setInterval(refreshConnectionsStatus, 10000);
+
 let tgQrPoll = null;
 function startTgQrPoll(){
   if(tgQrPoll) clearInterval(tgQrPoll);

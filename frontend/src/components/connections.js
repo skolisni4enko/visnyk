@@ -65,7 +65,7 @@ export function initConnectionsCollapse() {
   });
 }
 
-export function updateConnectionsFooter(waOk, tgOk) {
+export function updateConnectionsFooter(waOk, tgOk, viberOk) {
   const waDot = document.querySelector('.conn-dot.wa');
   const tgDot = document.querySelector('.conn-dot.tg');
   const waFooter = document.getElementById('conn-footer-wa');
@@ -84,6 +84,14 @@ export function updateConnectionsFooter(waOk, tgOk) {
     if (tgFooter) {
       tgFooter.classList.remove('ok','err'); tgFooter.classList.add(cls);
       const b = tgFooter.querySelector('b'); if (b) b.textContent = tgOk ? 'Підключено ✓' : 'Не підключено';
+    }
+  }
+  if (viberOk !== null && viberOk !== undefined) {
+    const viberFooter = document.getElementById('conn-footer-viber');
+    if (viberFooter) {
+      const cls = viberOk ? 'ok' : 'err';
+      viberFooter.classList.remove('ok','err'); viberFooter.classList.add(cls);
+      const b = viberFooter.querySelector('b'); if (b) b.textContent = viberOk ? 'Підключено ✓' : 'Не підключено';
     }
   }
 }

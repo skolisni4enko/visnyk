@@ -1,5 +1,5 @@
 Package: visnyk
-Version: 0.1.1
+Version: 0.2.0
 Section: utils
 Priority: optional
 Architecture: amd64
@@ -7,9 +7,9 @@ Maintainer: Visnyk Team <team@visnyk.local>
 Description: broadcast messenger for WA, TG, Viber
  Checks number availability and delivers to all available messengers.
  Uses a single personal account per messenger.
- 0.1.1: added direct send — Send WA and Send TG buttons alongside
- broadcast to all. Direct send targets one messenger without fallback
- and reports contact not found or send failure. Delay 8-15s preserved.
+ 0.2.0: Telegram resolve-first send, parallel WA/TG delivery with
+ per-channel pacing and FLOOD_WAIT handling, dead-session circuit
+ breaker, background health monitor. Delay 8-15s preserved.
 Depends: libc6, libgtk-3-0, libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37
 Recommends: libayatana-appindicator3-1
 Homepage: https://github.com/visnyk/visnyk

@@ -232,7 +232,7 @@ func (s *Service) RequestPairCode(ctx context.Context, phone string) (string, er
 		}
 		// Don't hard-fail on missing QR — PairPhone can work without it if socket connected
 		if !connected {
-			return "", fmt.Errorf("QR не готовий: натисніть Підключити і зачекайте 3с поки з'явиться QR, потім знову Отримати код (hasQR=%v connected=%v)", hasQR, connected)
+			return "", fmt.Errorf("QR not ready: click Connect and wait 3s until QR appears, then request code again (hasQR=%v connected=%v)", hasQR, connected)
 		}
 	}
 	origPhone := phone
