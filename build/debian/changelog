@@ -1,3 +1,13 @@
+visnyk (0.3.0-1) noble; urgency=low
+
+  * Broadcast file attachments: 1 file per batch (photo/video/audio up
+    to 16MB, documents up to 100MB), message template as caption.
+    Texts over the 1024 caption limit go bare-file plus chunked
+    follow-ups (TG 4096, WA chunked), WA audio caption fallback.
+    Attachment chip in compose UI, [file: name] tag in history.
+
+ -- Visnyk Team <team@visnyk.local>  Fri, 11 Sep 2026 12:00:00 +0200
+
 visnyk (0.2.0-1) noble; urgency=low
 
   * Telegram resolve-first send (no address-book pollution), parallel

@@ -372,6 +372,16 @@ func (s *Service) IsOnWhatsApp(phone string) (bool, error) {
 
 // Send sends a text message to phone (E.164). Accepts HTML from Quill editor — converts to WhatsApp markdown so appearance is identical with Telegram.
 func (s *Service) Send(phone, message string) error {
+	if message != "" {
+		// use format helper; if message is HTML, convert, else keep plain
+		// import is dynamic to avoid cycle — call via helper function
+		message = toWhatsAppMessage(message)
+	}
+	return s.sendConvertedText(phone, message)
+}
+
+// sendConvertedText delivers already-converted WhatsApp markdown.
+func (s *Service) sendConvertedText(phone, md string) error {
 	if s.client == nil || !s.client.IsConnected() {
 		return fmt.Errorf("whatsapp not connected")
 	}
@@ -379,18 +389,12 @@ func (s *Service) Send(phone, message string) error {
 	if err != nil {
 		return err
 	}
-	// Normalize HTML -> WhatsApp markdown for identical appearance across messengers
-	if message != "" {
-		// use format helper; if message is HTML, convert, else keep plain
-		// import is dynamic to avoid cycle — call via helper function
-		message = toWhatsAppMessage(message)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	_ = ctx
 	msg := &waProto.Message{
-		Conversation: &message,
+		Conversation: &md,
 	}
 	_, err = s.client.SendMessage(context.Background(), jid, msg)
 	if err != nil {

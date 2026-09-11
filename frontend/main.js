@@ -7,6 +7,7 @@ import { initRichEditors } from './src/components/editor.js';
 import { initConnectionsTabs, initConnectionsCollapse, updateConnectionsFooter } from './src/components/connections.js';
 import { initCascadeProgress, showOverlay } from './src/components/progress.js';
 import { initHistory } from './src/components/history.js';
+import { initAttachments, getAttachment } from './src/components/attachments.js';
 
 const $ = (s) => document.querySelector(s);
 const waState = $('#wa-state');
@@ -372,6 +373,7 @@ initBulkImport();
 initRichEditors();
 initCascadeProgress();
 initHistory();
+initAttachments();
 
 // show log path where available
 (async () => {
@@ -432,9 +434,10 @@ async function startBulkSend(mode) {
   try { await window.go.ui.App.LogApp('INFO', 'ui', `ui start batch mode=${mode} total=${contacts.length}`); } catch {}
   try {
     let errStr = '';
-    if (mode === 'whatsapp') errStr = await window.go.ui.App.StartWhatsAppBatch(contacts, template);
-    else if (mode === 'telegram') errStr = await window.go.ui.App.StartTelegramBatch(contacts, template);
-    else errStr = await window.go.ui.App.StartCascadeBatch(contacts, template);
+    const att = getAttachment();
+    if (mode === 'whatsapp') errStr = await window.go.ui.App.StartWhatsAppBatch(contacts, template, att);
+    else if (mode === 'telegram') errStr = await window.go.ui.App.StartTelegramBatch(contacts, template, att);
+    else errStr = await window.go.ui.App.StartCascadeBatch(contacts, template, att);
     if (errStr && errStr.length > 0) {
       if (progress) { progress.textContent = 'Помилка старту: ' + errStr; progress.className = 'small err'; }
       const ov = document.getElementById('cascade-overlay');

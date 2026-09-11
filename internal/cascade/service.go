@@ -89,32 +89,50 @@ func (s *Service) channelDead(ch Channel) bool {
 // It respects ctx cancellation. Pacing is per-channel (see paceChannel),
 // so there is no extra sleep between contacts here.
 func (s *Service) SendBatch(ctx context.Context, contacts []Contact, template string) []SendResult {
-	return s.SendBatchWithProgress(ctx, contacts, template, nil)
+	return s.SendBatchWithAttachment(ctx, contacts, template, nil)
+}
+
+// SendBatchWithAttachment is like SendBatch but delivers one file with
+// the template as caption to every contact (nil = text only).
+func (s *Service) SendBatchWithAttachment(ctx context.Context, contacts []Contact, template string, att *Attachment) []SendResult {
+	return s.SendBatchWithProgressAndBatchWithAttachment(ctx, contacts, template, "", att, nil)
 }
 
 // SendBatchWithBatch is batch-aware wrapper.
 func (s *Service) SendBatchWithBatch(ctx context.Context, contacts []Contact, template, batchID string) []SendResult {
-	return s.SendBatchWithProgressAndBatch(ctx, contacts, template, batchID, nil)
+	return s.SendBatchWithProgressAndBatchWithAttachment(ctx, contacts, template, batchID, nil, nil)
 }
 
 // SendBatchDirect sends only via the specified channel (no cascade fallback).
 // If contact is not available on that channel or send fails, result is failed with channel-specific error.
 func (s *Service) SendBatchDirect(ctx context.Context, contacts []Contact, template string, ch Channel) []SendResult {
-	return s.SendBatchDirectWithProgress(ctx, contacts, template, ch, nil)
+	return s.SendBatchDirectWithAttachment(ctx, contacts, template, ch, nil)
+}
+
+// SendBatchDirectWithAttachment is like SendBatchDirect but with one file (nil = text only).
+func (s *Service) SendBatchDirectWithAttachment(ctx context.Context, contacts []Contact, template string, ch Channel, att *Attachment) []SendResult {
+	return s.SendBatchDirectWithProgressAndBatchWithAttachment(ctx, contacts, template, ch, "", att, nil)
 }
 
 // SendBatchDirectWithBatch is batch-aware wrapper.
 func (s *Service) SendBatchDirectWithBatch(ctx context.Context, contacts []Contact, template string, ch Channel, batchID string) []SendResult {
-	return s.SendBatchDirectWithProgressAndBatch(ctx, contacts, template, ch, batchID, nil)
+	return s.SendBatchDirectWithProgressAndBatchWithAttachment(ctx, contacts, template, ch, batchID, nil, nil)
 }
 
 // SendBatchDirectWithProgress is like SendBatchDirect but emits progress per contact.
 func (s *Service) SendBatchDirectWithProgress(ctx context.Context, contacts []Contact, template string, ch Channel, onProgress func(Progress)) []SendResult {
-	return s.SendBatchDirectWithProgressAndBatch(ctx, contacts, template, ch, "", onProgress)
+	return s.SendBatchDirectWithProgressAndBatchWithAttachment(ctx, contacts, template, ch, "", nil, onProgress)
 }
 
 // SendBatchDirectWithProgressAndBatch is batch-aware variant.
 func (s *Service) SendBatchDirectWithProgressAndBatch(ctx context.Context, contacts []Contact, template string, ch Channel, batchID string, onProgress func(Progress)) []SendResult {
+	return s.SendBatchDirectWithProgressAndBatchWithAttachment(ctx, contacts, template, ch, batchID, nil, onProgress)
+}
+
+// SendBatchDirectWithProgressAndBatchWithAttachment is the full direct variant (att may be nil).
+func (s *Service) SendBatchDirectWithProgressAndBatchWithAttachment(ctx context.Context, contacts []Contact, template string, ch Channel, batchID string, att *Attachment, onProgress func(Progress)) []SendResult {
+	// Normalize once: WA/TG workers share att in parallel and must not mutate it.
+	att.Normalize()
 	// wrap progress to tag batchID
 	wrappedProgress := onProgress
 	if onProgress != nil && batchID != "" {
@@ -126,10 +144,11 @@ func (s *Service) SendBatchDirectWithProgressAndBatch(ctx context.Context, conta
 	// Hybrid batch path for Telegram: batch import (20 per chunk, 5s pacing),
 	// per-contact paced send via paceChannel (8-15s capped at 30s), then
 	// batch delete (50 per chunk). Avoids per-contact "Test" pollution
-	// and respects flood limits.
-	if ch == ChannelTelegram && len(contacts) >= 10 {
+	// and respects flood limits. Skipped when the batch carries a file:
+	// media goes through the per-contact loop so captions stay attached.
+	if ch == ChannelTelegram && att == nil && len(contacts) >= 10 {
 		if bi, ok := s.telegram.(BatchImporter); ok {
-			res := s.sendBatchDirectBatchHybrid(ctx, contacts, template, ch, wrappedProgress, bi)
+			res := s.sendBatchDirectBatchHybrid(ctx, contacts, template, ch, att, wrappedProgress, bi)
 			for i := range res {
 				res[i].BatchID = batchID
 			}
@@ -163,7 +182,7 @@ func (s *Service) SendBatchDirectWithProgressAndBatch(ctx context.Context, conta
 		if wrappedProgress != nil {
 			wrappedProgress(Progress{Index: i + 1, Total: total, Contact: c, Status: "checking", ETASeconds: eta, BatchID: batchID})
 		}
-		res := s.sendOneDirect(ctx, c, template, ch)
+		res := s.sendOneDirect(ctx, c, template, ch, att)
 		res.BatchID = batchID
 		results = append(results, res)
 		if wrappedProgress != nil {
@@ -273,7 +292,7 @@ func (s *Service) sendBatchDirectBatch(ctx context.Context, contacts []Contact, 
 // paced send, batch delete. Keeps the import benefit (no per-contact
 // ImportContacts) but sends each message with per-channel pacing
 // (paceChannel 8-15s capped at 30s) to avoid PEER_FLOOD.
-func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Contact, template string, ch Channel, onProgress func(Progress), bi BatchImporter) []SendResult {
+func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Contact, template string, ch Channel, att *Attachment, onProgress func(Progress), bi BatchImporter) []SendResult {
 	total := len(contacts)
 	s.resetDead()
 	if onProgress != nil {
@@ -360,7 +379,7 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 			}
 			continue
 		}
-		sent, errStr, sentAt := s.sendViaChannel(ctx, m, c.NormalizedPhone, template)
+		sent, errStr, sentAt := s.sendViaChannel(ctx, m, c.NormalizedPhone, template, att)
 		var res SendResult
 		if !sent {
 			if errStr == "" {
@@ -391,11 +410,18 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 // No inter-contact sleep here: pacing is enforced per-channel by paceChannel
 // inside sendViaChannel, otherwise contacts would pay the delay twice.
 func (s *Service) SendBatchWithProgress(ctx context.Context, contacts []Contact, template string, onProgress func(Progress)) []SendResult {
-	return s.SendBatchWithProgressAndBatch(ctx, contacts, template, "", onProgress)
+	return s.SendBatchWithProgressAndBatchWithAttachment(ctx, contacts, template, "", nil, onProgress)
 }
 
 // SendBatchWithProgressAndBatch is batch-aware variant that tags results/progress with batchID.
 func (s *Service) SendBatchWithProgressAndBatch(ctx context.Context, contacts []Contact, template, batchID string, onProgress func(Progress)) []SendResult {
+	return s.SendBatchWithProgressAndBatchWithAttachment(ctx, contacts, template, batchID, nil, onProgress)
+}
+
+// SendBatchWithProgressAndBatchWithAttachment is the full broadcast variant (att may be nil).
+func (s *Service) SendBatchWithProgressAndBatchWithAttachment(ctx context.Context, contacts []Contact, template, batchID string, att *Attachment, onProgress func(Progress)) []SendResult {
+	// Normalize once: WA/TG workers share att in parallel and must not mutate it.
+	att.Normalize()
 	results := make([]SendResult, 0, len(contacts))
 	total := len(contacts)
 	s.resetDead()
@@ -416,7 +442,7 @@ func (s *Service) SendBatchWithProgressAndBatch(ctx context.Context, contacts []
 		if onProgress != nil {
 			onProgress(Progress{Index: i + 1, Total: total, Contact: c, Status: "checking", ETASeconds: eta, BatchID: batchID})
 		}
-		res := s.sendOneCtx(ctx, c, template)
+		res := s.sendOneCtx(ctx, c, template, att)
 		res.BatchID = batchID
 		results = append(results, res)
 		if onProgress != nil {
@@ -441,10 +467,10 @@ func (s *Service) SendBatchWithProgressAndBatch(ctx context.Context, contacts []
 }
 
 func (s *Service) sendOne(ctx context.Context, c Contact, tmpl string) SendResult {
-	return s.sendOneCtx(ctx, c, tmpl)
+	return s.sendOneCtx(ctx, c, tmpl, nil)
 }
 
-func (s *Service) sendOneCtx(ctx context.Context, c Contact, tmpl string) SendResult {
+func (s *Service) sendOneCtx(ctx context.Context, c Contact, tmpl string, att *Attachment) SendResult {
 	// Broadcast to all available messengers on independent schedules:
 	// WhatsApp and Telegram sends run in parallel goroutines ("different
 	// threads"), each with its own pacing, and results are merged.
@@ -463,7 +489,7 @@ func (s *Service) sendOneCtx(ctx context.Context, c Contact, tmpl string) SendRe
 		wg.Add(1)
 		go func(m Messenger) {
 			defer wg.Done()
-			sent, errStr, sentAt := s.sendViaChannel(ctx, m, c.NormalizedPhone, msg)
+			sent, errStr, sentAt := s.sendViaChannel(ctx, m, c.NormalizedPhone, msg, att)
 			mu.Lock()
 			defer mu.Unlock()
 			if sent {
@@ -547,17 +573,38 @@ func (s *Service) paceChannel(ctx context.Context, ch Channel) error {
 	return nil
 }
 
-// sendViaChannel delivers via one messenger: pace, then DirectSender fast
-// path (single resolve+send) or classic IsAvailable+Send. Flood waits are
-// honored in full and retried once; skippable errors are not retried.
+// sendViaChannel delivers via one messenger: pace, then MediaSender (when
+// the batch carries a file), DirectSender fast path (single resolve+send)
+// or classic IsAvailable+Send. Flood waits are honored in full and retried
+// once; skippable errors are not retried.
 // A channel killed earlier in this batch (fatal auth error) is skipped
 // instantly — no pacing, no API calls.
-func (s *Service) sendViaChannel(ctx context.Context, m Messenger, phone, msg string) (bool, string, time.Time) {
+func (s *Service) sendViaChannel(ctx context.Context, m Messenger, phone, msg string, att *Attachment) (bool, string, time.Time) {
 	if s.channelDead(m.Name()) {
 		return false, channelLabel(m.Name()) + ": " + SessionLostError, time.Time{}
 	}
 	if err := s.paceChannel(ctx, m.Name()); err != nil {
 		return false, "", time.Time{}
+	}
+	if att != nil {
+		if ms, ok := m.(MediaSender); ok {
+			if err := s.withFloodRetry(ctx, m.Name(), func() error {
+				return ms.SendMedia(phone, msg, att)
+			}); err != nil {
+				return false, channelLabel(m.Name()) + ": " + sendErrText(m.Name(), err), time.Time{}
+			}
+			return true, "", time.Now()
+		}
+		// Messenger cannot send files: deliver text so the contact still
+		// gets the message, and note the skipped attachment.
+		if ds, ok := m.(DirectSender); ok {
+			if err := s.withFloodRetry(ctx, m.Name(), func() error {
+				return ds.ResolveAndSend(phone, msg)
+			}); err != nil {
+				return false, channelLabel(m.Name()) + ": " + sendErrText(m.Name(), err), time.Time{}
+			}
+			return true, channelLabel(m.Name()) + ": attachment skipped (files not supported here), text sent", time.Now()
+		}
 	}
 	if ds, ok := m.(DirectSender); ok {
 		if err := s.withFloodRetry(ctx, m.Name(), func() error {
@@ -600,6 +647,10 @@ func (s *Service) sendViaChannel(ctx context.Context, m Messenger, phone, msg st
 		return m.Send(phone, msg)
 	}); err != nil {
 		return false, channelLabel(m.Name()) + ": " + sendErrText(m.Name(), err), time.Time{}
+	}
+	if att != nil {
+		// Messenger cannot send files: text was delivered, flag the drop.
+		return true, channelLabel(m.Name()) + ": attachment skipped (files not supported here), text sent", time.Now()
 	}
 	return true, "", time.Now()
 }
@@ -761,7 +812,7 @@ func channelLabel(ch Channel) string {
 	}
 }
 
-func (s *Service) sendOneDirect(ctx context.Context, c Contact, tmpl string, ch Channel) SendResult {
+func (s *Service) sendOneDirect(ctx context.Context, c Contact, tmpl string, ch Channel, att *Attachment) SendResult {
 	m := s.messengerFor(ch)
 	if m == nil {
 		return SendResult{Contact: c, Channel: ch, Status: "failed", Error: "messenger " + channelLabel(ch) + " not initialized", SentAt: time.Now()}
@@ -769,7 +820,7 @@ func (s *Service) sendOneDirect(ctx context.Context, c Contact, tmpl string, ch 
 	if s.channelDead(ch) {
 		return SendResult{Contact: c, Channel: ch, Status: "failed", Error: channelLabel(ch) + ": " + SessionLostError, SentAt: time.Now()}
 	}
-	sent, errStr, sentAt := s.sendViaChannel(ctx, m, c.NormalizedPhone, tmpl)
+	sent, errStr, sentAt := s.sendViaChannel(ctx, m, c.NormalizedPhone, tmpl, att)
 	if !sent {
 		if errStr == "" {
 			errStr = "contact not found in " + channelLabel(ch)

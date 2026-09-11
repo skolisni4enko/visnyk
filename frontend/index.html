@@ -205,6 +205,16 @@
           <div id="bulk-quill" class="quill-editor"></div>
         </div>
         <textarea id="bulk-template" class="hidden" aria-hidden="true"></textarea>
+        <div class="attach-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0">
+          <input id="attach-file-input" type="file" hidden accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv,.zip" aria-label="Вибрати файл для розсилки" />
+          <button id="btn-attach" class="btn ghost small" title="Один файл на всю розсилку: фото, відео, аудіо до 16 МБ, документи до 100 МБ">📎 Додати файл</button>
+          <div id="attach-chip" class="attach-chip hidden" aria-live="polite">
+            <span id="attach-name" class="mono"></span>
+            <button id="btn-attach-remove" class="btn ghost small" title="Прибрати файл" aria-label="Прибрати файл">✕</button>
+          </div>
+          <span class="small" style="color:#737373">1 файл на розсилку · текст до 1024 знаків піде підписом, довший — окремим повідомленням цілком · фото/відео/аудіо до 16 МБ, документи до 100 МБ</span>
+        </div>
+        <p id="attach-error" class="error hidden" role="alert"></p>
         <div class="actions">
           <button id="btn-bulk-send" class="btn primary small" disabled>Надіслати у всі месенджери</button>
           <button id="btn-bulk-send-wa" class="btn small" disabled style="border-color:#a7f3d0;background:#ecfdf5;color:#065f46">Надіслати WA</button>
