@@ -375,18 +375,6 @@ initCascadeProgress();
 initHistory();
 initAttachments();
 
-// show log path where available
-(async () => {
-  if (!isWailsAvailable()) return;
-  try {
-    const p = await window.go.ui.App.GetLogFilePath();
-    const a = document.getElementById('bulk-log-path');
-    const b = document.getElementById('cascade-log-path');
-    if (a) a.textContent = p;
-    if (b) b.textContent = p;
-  } catch {}
-})();
-
 // Bulk cascade + direct send — via overlay + async events + file logging
 const btnBulkSend = document.getElementById('btn-bulk-send');
 const btnBulkSendWa = document.getElementById('btn-bulk-send-wa');

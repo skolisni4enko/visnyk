@@ -62,15 +62,14 @@ function channelBadge(ch) {
   // Support broadcast combined channels like "whatsapp,telegram" — render multiple badges
   const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
   if (parts.length > 1) {
-    // Recursively render each and add indicator for "all"
-    const badges = parts.map(p => {
+    // Multiple channels (broadcast) — just the badges, no extra label.
+    return parts.map(p => {
       if (p === 'whatsapp') return '<span class="badge badge-valid">whatsapp</span>';
       if (p === 'telegram') return '<span class="badge badge-warn">telegram</span>';
       if (p === 'viber') return '<span class="badge" style="background:#f3e8ff;border-color:#e9d5ff;color:#6b21a8">viber</span>';
       if (p === 'none' || p === '') return '<span class="badge badge-invalid">none</span>';
       return `<span class="badge">${escapeHtml(p)}</span>`;
     }).join(' ');
-    return badges + ' <span class="small ok" style="font-weight:700" title="відправлено у всі доступні месенджери">✓ всі</span>';
   }
   const c = parts[0] || raw;
   if (c === 'whatsapp') return '<span class="badge badge-valid">whatsapp</span>';
