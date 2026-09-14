@@ -1,6 +1,9 @@
 package whatsapp
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestParseJID(t *testing.T) {
 	tests := []struct {
@@ -34,6 +37,32 @@ func TestServiceName(t *testing.T) {
 	}
 	if s.DBPath() == "" {
 		t.Error("DBPath empty")
+	}
+}
+
+func TestIsNoLIDError(t *testing.T) {
+	lidErr := errors.New(`send media "zarahuvannia.png": no LID found for 380958419473@s.whatsapp.net from server`)
+	if !isNoLIDError(lidErr) {
+		t.Error("must detect no-LID error from server")
+	}
+	if isNoLIDError(errors.New("send message: timeout")) {
+		t.Error("timeout must not count as no-LID")
+	}
+	if isNoLIDError(nil) {
+		t.Error("nil must not count as no-LID")
+	}
+}
+
+func TestSendWithoutClient(t *testing.T) {
+	s, _ := NewWithDB("file::memory:?cache=shared")
+	if err := s.sendConvertedText("+380991234567", "hi"); err == nil {
+		t.Error("send without client must fail, not panic")
+	}
+	if _, err := s.IsOnWhatsApp("+380991234567"); err == nil {
+		t.Error("IsOnWhatsApp without client must fail, not panic")
+	}
+	if err := s.SendMedia("+380991234567", "cap", nil); err == nil {
+		t.Error("SendMedia nil attachment must fail, not panic")
 	}
 }
 

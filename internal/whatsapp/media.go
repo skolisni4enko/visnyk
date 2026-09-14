@@ -52,6 +52,19 @@ func (s *Service) SendMedia(phone, caption string, att *cascade.Attachment) erro
 	if err != nil {
 		return err
 	}
+	// Warm the LID mapping cache before Upload/Send: the cascade media
+	// path skips IsAvailable, so without this SendMessage fails with
+	// "no LID found ... from server" even for valid numbers. This also
+	// fails fast with a clear message for numbers not on WhatsApp
+	// instead of wasting a media upload.
+	if ok, werr := s.IsOnWhatsApp(phone); werr != nil {
+		// Check failure is not fatal: SendMessage has its own
+		// GetUserInfo fallback, and sendConvertedText retries after
+		// warming. Proceed so a transient usync outage never blocks sends.
+		_ = werr
+	} else if !ok {
+		return fmt.Errorf("not on WhatsApp: %s", phone)
+	}
 	// Long texts don't fit the 1024 caption: the file goes bare and the
 	// full text follows as chunked text message(s) — no silent truncation.
 	// (Markdown cuts are cosmetic only: a split "*bold*" renders literally,
@@ -147,7 +160,21 @@ func (s *Service) SendMedia(phone, caption string, att *cascade.Attachment) erro
 	sendCtx, cancelSend := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelSend()
 	if _, err := s.client.SendMessage(sendCtx, jid, msg); err != nil {
-		return fmt.Errorf("send media %q: %w", att.FileName, err)
+		if isNoLIDError(err) {
+			// LID mapping went cold between the pre-upload check and
+			// the send (or the check was skipped on transient failure):
+			// re-warm once and retry. Still failing means the server
+			// really has no LID for this number.
+			if ok, werr := s.IsOnWhatsApp(phone); werr == nil && ok {
+				if _, rerr := s.client.SendMessage(sendCtx, jid, msg); rerr != nil {
+					return fmt.Errorf("send media %q: %w", att.FileName, rerr)
+				}
+			} else {
+				return fmt.Errorf("send media %q: not on WhatsApp (no LID mapping from server): %w", att.FileName, err)
+			}
+		} else {
+			return fmt.Errorf("send media %q: %w", att.FileName, err)
+		}
 	}
 	if kind == cascade.AttachmentAudio && tails == nil && md != "" {
 		// AudioMessage has no caption field: deliver the text separately.
