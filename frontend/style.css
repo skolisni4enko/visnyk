@@ -182,3 +182,8 @@ body.sending .cascade-overlay{pointer-events:auto}
 #app::-webkit-scrollbar-track{background:transparent}
 .table-wrap::-webkit-scrollbar{width:6px;height:6px}
 .table-wrap::-webkit-scrollbar-thumb{background:#d4d4d4;border-radius:6px}
+/* broadcast attachment chip */
+.attach-chip{display:inline-flex;align-items:center;gap:8px;border:1px solid #d4d4d4;background:#f8fafc;border-radius:999px;padding:4px 6px 4px 12px;font-size:0.74rem;max-width:100%}
+.attach-chip .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:320px}
+.attach-chip .btn{min-height:28px;padding:2px 8px}
+.attach-row .btn:disabled{opacity:.55;cursor:not-allowed}

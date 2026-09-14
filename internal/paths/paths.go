@@ -49,9 +49,12 @@ func WhatsAppDir() string { return filepath.Join(DataDir(), "whatsapp") }
 // LogsPath — optional file log (also stored in DB).
 func LogsPath() string { return filepath.Join(DataDir(), "app.log") }
 
+// AttachmentsDir — staged broadcast files (one per SendBatch attachment).
+func AttachmentsDir() string { return filepath.Join(DataDir(), "attachments") }
+
 // EnsureDataDirs creates all required directories.
 func EnsureDataDirs() error {
-	for _, d := range []string{DataDir(), TelegramDir(), WhatsAppDir()} {
+	for _, d := range []string{DataDir(), TelegramDir(), WhatsAppDir(), AttachmentsDir()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}

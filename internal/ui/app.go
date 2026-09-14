@@ -25,7 +25,7 @@ import (
 )
 
 // Version injected from main.
-var AppVersion = "0.2.0"
+var AppVersion = "0.3.0"
 
 // App is the Wails-bound application. All methods are exposed to the frontend.
 type App struct {
@@ -306,18 +306,25 @@ func generateBatchID() string {
 
 // SendCascadeBatch sends via cascade WA → TG → Viber (currently WA only).
 // contacts are slice of {Name,PhoneRaw,NormalizedPhone} passed from frontend.
-func (a *App) SendCascadeBatch(contacts []cascade.Contact, template string) []cascade.SendResult {
+// att may be nil (text only) — one file for the whole batch otherwise.
+func (a *App) SendCascadeBatch(contacts []cascade.Contact, template string, att *cascade.Attachment) []cascade.SendResult {
 	ctx := a.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	loaded, errStr := a.loadAttachment(att)
+	if errStr != "" {
+		a.logFile("WARN", "cascade", fmt.Sprintf("attachment rejected: %s", errStr))
+		return []cascade.SendResult{}
+	}
+	preview := withFilePrefix(template, loaded)
 	batchID := generateBatchID()
 	// file + db log start
 	a.logFile("INFO", "cascade", fmt.Sprintf("batch start (sync) batch=%s total=%d template_len=%d", batchID, len(contacts), len(template)))
 	if a.store != nil {
-		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: "cascade", MessagePreview: template, CreatedAt: time.Now(), Total: len(contacts)})
+		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: "cascade", MessagePreview: preview, CreatedAt: time.Now(), Total: len(contacts)})
 	}
-	res := a.cascadeSvc.SendBatchWithBatch(ctx, contacts, template, batchID)
+	res := a.cascadeSvc.SendBatchWithProgressAndBatchWithAttachment(ctx, contacts, template, batchID, loaded, nil)
 	if a.store != nil {
 		for _, r := range res {
 			_ = a.store.AddHistory(storage.HistoryEntry{
@@ -328,7 +335,7 @@ func (a *App) SendCascadeBatch(contacts []cascade.Contact, template string) []ca
 				Status:         r.Status,
 				Error:          r.Error,
 				SentAt:         r.SentAt,
-				MessagePreview: template,
+				MessagePreview: preview,
 				BatchID:        r.BatchID,
 			})
 			_ = a.store.Log("INFO", "cascade", fmt.Sprintf("send %s via %s status=%s err=%s batch=%s", r.Contact.NormalizedPhone, r.Channel, r.Status, r.Error, r.BatchID))
@@ -343,49 +350,59 @@ func (a *App) SendCascadeBatch(contacts []cascade.Contact, template string) []ca
 
 // StartCascadeBatch starts async cascade with progress events. Returns "" on success or error string.
 // Frontend listens to "cascade:progress" and "cascade:done" events.
-func (a *App) StartCascadeBatch(contacts []cascade.Contact, template string) string {
-	return a.startBatchInternal(contacts, template, "", cascade.ChannelNone)
+func (a *App) StartCascadeBatch(contacts []cascade.Contact, template string, att *cascade.Attachment) string {
+	return a.startBatchInternal(contacts, template, "", cascade.ChannelNone, att)
 }
 
 // StartWhatsAppBatch sends only via WhatsApp (no cascade fallback).
-func (a *App) StartWhatsAppBatch(contacts []cascade.Contact, template string) string {
-	return a.startBatchInternal(contacts, template, "whatsapp", cascade.ChannelWhatsApp)
+func (a *App) StartWhatsAppBatch(contacts []cascade.Contact, template string, att *cascade.Attachment) string {
+	return a.startBatchInternal(contacts, template, "whatsapp", cascade.ChannelWhatsApp, att)
 }
 
 // StartTelegramBatch sends only via Telegram (no cascade fallback).
-func (a *App) StartTelegramBatch(contacts []cascade.Contact, template string) string {
-	return a.startBatchInternal(contacts, template, "telegram", cascade.ChannelTelegram)
+func (a *App) StartTelegramBatch(contacts []cascade.Contact, template string, att *cascade.Attachment) string {
+	return a.startBatchInternal(contacts, template, "telegram", cascade.ChannelTelegram, att)
 }
 
 // SendWhatsAppBatch sync direct WA batch (for tests / non-async usage).
-func (a *App) SendWhatsAppBatch(contacts []cascade.Contact, template string) []cascade.SendResult {
+func (a *App) SendWhatsAppBatch(contacts []cascade.Contact, template string, att *cascade.Attachment) []cascade.SendResult {
 	ctx := a.ctx
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	loaded, errStr := a.loadAttachment(att)
+	if errStr != "" {
+		a.logFile("WARN", "whatsapp-direct", fmt.Sprintf("attachment rejected: %s", errStr))
+		return []cascade.SendResult{}
 	}
 	batchID := generateBatchID()
 	a.logFile("INFO", "whatsapp-direct", fmt.Sprintf("batch start (sync) batch=%s total=%d", batchID, len(contacts)))
 	if a.store != nil {
-		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: "whatsapp", MessagePreview: template, CreatedAt: time.Now(), Total: len(contacts)})
+		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: "whatsapp", MessagePreview: withFilePrefix(template, loaded), CreatedAt: time.Now(), Total: len(contacts)})
 	}
-	res := a.cascadeSvc.SendBatchDirectWithBatch(ctx, contacts, template, cascade.ChannelWhatsApp, batchID)
-	a.persistDirectResults(res, template, "whatsapp-direct")
+	res := a.cascadeSvc.SendBatchDirectWithProgressAndBatchWithAttachment(ctx, contacts, template, cascade.ChannelWhatsApp, batchID, loaded, nil)
+	a.persistDirectResults(res, withFilePrefix(template, loaded), "whatsapp-direct")
 	return res
 }
 
 // SendTelegramBatch sync direct TG batch.
-func (a *App) SendTelegramBatch(contacts []cascade.Contact, template string) []cascade.SendResult {
+func (a *App) SendTelegramBatch(contacts []cascade.Contact, template string, att *cascade.Attachment) []cascade.SendResult {
 	ctx := a.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	loaded, errStr := a.loadAttachment(att)
+	if errStr != "" {
+		a.logFile("WARN", "telegram-direct", fmt.Sprintf("attachment rejected: %s", errStr))
+		return []cascade.SendResult{}
+	}
 	batchID := generateBatchID()
 	a.logFile("INFO", "telegram-direct", fmt.Sprintf("batch start (sync) batch=%s total=%d", batchID, len(contacts)))
 	if a.store != nil {
-		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: "telegram", MessagePreview: template, CreatedAt: time.Now(), Total: len(contacts)})
+		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: "telegram", MessagePreview: withFilePrefix(template, loaded), CreatedAt: time.Now(), Total: len(contacts)})
 	}
-	res := a.cascadeSvc.SendBatchDirectWithBatch(ctx, contacts, template, cascade.ChannelTelegram, batchID)
-	a.persistDirectResults(res, template, "telegram-direct")
+	res := a.cascadeSvc.SendBatchDirectWithProgressAndBatchWithAttachment(ctx, contacts, template, cascade.ChannelTelegram, batchID, loaded, nil)
+	a.persistDirectResults(res, withFilePrefix(template, loaded), "telegram-direct")
 	return res
 }
 
@@ -416,7 +433,7 @@ func (a *App) persistDirectResults(res []cascade.SendResult, template, source st
 	a.logFile("INFO", source, fmt.Sprintf("batch done (sync) batch=%s sent=%d total=%d", batch, countSent(res), len(res)))
 }
 
-func (a *App) startBatchInternal(contacts []cascade.Contact, template string, logSource string, ch cascade.Channel) string {
+func (a *App) startBatchInternal(contacts []cascade.Contact, template string, logSource string, ch cascade.Channel, att *cascade.Attachment) string {
 	isDirect := ch != cascade.ChannelNone && ch != ""
 	source := logSource
 	batchID := generateBatchID()
@@ -425,8 +442,17 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 		batchChannel = "cascade"
 	}
 	batchCreatedAt := time.Now()
+	loaded, errStr := a.loadAttachment(att)
+	if errStr != "" {
+		a.logFile("WARN", source, fmt.Sprintf("attachment rejected batch=%s: %s", batchID, errStr))
+		return "файл відхилено: " + errStr
+	}
+	preview := withFilePrefix(template, loaded)
+	if loaded != nil {
+		a.logFile("INFO", source, fmt.Sprintf("batch attachment batch=%s file=%q mime=%s size=%d", batchID, loaded.FileName, loaded.MIME, loaded.Size))
+	}
 	sendFn := func(ctx context.Context, onProgress func(cascade.Progress)) []cascade.SendResult {
-		return a.cascadeSvc.SendBatchWithProgressAndBatch(ctx, contacts, template, batchID, onProgress)
+		return a.cascadeSvc.SendBatchWithProgressAndBatchWithAttachment(ctx, contacts, template, batchID, loaded, onProgress)
 	}
 	if isDirect {
 		if ch == cascade.ChannelWhatsApp {
@@ -440,7 +466,7 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 			}
 		}
 		sendFn = func(ctx context.Context, onProgress func(cascade.Progress)) []cascade.SendResult {
-			return a.cascadeSvc.SendBatchDirectWithProgressAndBatch(ctx, contacts, template, ch, batchID, onProgress)
+			return a.cascadeSvc.SendBatchDirectWithProgressAndBatchWithAttachment(ctx, contacts, template, ch, batchID, loaded, onProgress)
 		}
 	} else {
 		source = "cascade"
@@ -468,7 +494,7 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 	a.logFile("INFO", source, fmt.Sprintf("batch start async batch=%s total=%d", batchID, len(contacts)))
 	if a.store != nil {
 		_ = a.store.Log("INFO", source, fmt.Sprintf("batch start async batch=%s total=%d", batchID, len(contacts)))
-		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: batchChannel, MessagePreview: template, CreatedAt: batchCreatedAt, Total: len(contacts)})
+		_ = a.store.CreateBatch(storage.Batch{ID: batchID, Channel: batchChannel, MessagePreview: preview, CreatedAt: batchCreatedAt, Total: len(contacts)})
 	}
 	if a.ctx != nil {
 		wailsRuntime.EventsEmit(a.ctx, "cascade:start", map[string]interface{}{"total": len(contacts), "channel": string(ch), "mode": source, "batchId": batchID})
@@ -500,7 +526,7 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 						Status:         p.Status,
 						Error:          p.Error,
 						SentAt:         p.SentAt,
-						MessagePreview: template,
+						MessagePreview: preview,
 						BatchID:        p.BatchID,
 					})
 					_ = a.store.Log("INFO", source, fmt.Sprintf("send %s via %s status=%s batch=%s", p.Contact.NormalizedPhone, p.Channel, p.Status, p.BatchID))
@@ -1354,6 +1380,6 @@ func (a *App) CheckContacts(contacts []cascade.Contact) []CheckResult {
 }
 
 // SendCascadeBatchWithLog is alias for frontend compatibility.
-func (a *App) SendCascadeBatchWithLog(contacts []cascade.Contact, template string) []cascade.SendResult {
-	return a.SendCascadeBatch(contacts, template)
+func (a *App) SendCascadeBatchWithLog(contacts []cascade.Contact, template string, att *cascade.Attachment) []cascade.SendResult {
+	return a.SendCascadeBatch(contacts, template, att)
 }

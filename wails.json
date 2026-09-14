@@ -12,7 +12,7 @@
   "info": {
     "companyName": "Visnyk",
     "productName": "Visnyk",
-    "productVersion": "0.2.0",
+    "productVersion": "0.3.0",
     "copyright": "Copyright (c) 2026 Visnyk Team",
     "comments": "Broadcast to all available messengers - WhatsApp, Telegram, Viber"
   },

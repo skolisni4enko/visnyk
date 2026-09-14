@@ -1,4 +1,4 @@
-# Architecture — visnyk 0.1.0
+# Architecture — visnyk 0.3.0
 
 ## Purpose
 Visnyk — cascade broadcast for your inner circle (up to 100 numbers `+380`).
@@ -41,7 +41,7 @@ internal/storage — visnyk.db (encrypted settings, history, logs, ClearAll)
   app.log                          # optional
 
 cmd/app/main.go          — wiring only
-main.go                  — wails.Run, embed frontend/dist, version 0.1.0, MigrateLegacy + EnsureDataDirs
+main.go                  — wails.Run, embed frontend/dist, version 0.3.0, MigrateLegacy + EnsureDataDirs
 internal/
   cascade/service.go     — cascade, SendBatch, models
   normalizer/phone.go    — E.164 via phonenumbers
@@ -68,7 +68,7 @@ docs/
   ARCHITECTURE.md        — this file
   plan.md                — original plan
 AGENTS.md                — agent rules, build cmds
-wails.json               — wails config (frontend/dist, info 0.1.0, author)
+wails.json               — wails config (frontend/dist, info 0.3.0, author)
 build/
   nfpm.yaml              — .deb via nfpm (libgtk, libwebkit)
   debian/DEBIAN/control  — dpkg-deb fallback
@@ -125,8 +125,8 @@ CGO_ENABLED=0 wails build -platform windows/amd64 -nsis  # installer — require
 
 # Linux .deb (needs nfpm or dpkg-deb)
 wails build -platform linux/amd64
-./scripts/build-deb.sh 0.1.0
-# or: nfpm pkg --packager deb --config build/nfpm.yaml --target build/bin/visnyk_0.1.0_amd64.deb
+./scripts/build-deb.sh 0.3.0
+# or: nfpm pkg --packager deb --config build/nfpm.yaml --target build/bin/visnyk_0.3.0_amd64.deb
 
 # macOS .app + DMG (needs Apple Developer ID)
 wails build -platform darwin/universal
@@ -134,14 +134,14 @@ wails build -platform darwin/universal
 
 # Goland workaround (adjust PKG_CONFIG_PATH to your system)
 PKG_CONFIG_PATH=./.pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig \
-  go build -ldflags "-X main.Version=0.1.0" -tags=desktop,production -o /tmp/visnyk .
+  go build -ldflags "-X main.Version=0.3.0" -tags=desktop,production -o /tmp/visnyk .
 
 # frontend only
 npm run build && wails build
 ```
 
 ## Version & Signing
-- `wails.json:info.productVersion` = `0.1.0` (git tag `0.1.0`), `author` = `Visnyk Team <team@visnyk.local>`, `companyName` = `Visnyk`.
+- `wails.json:info.productVersion` = `0.3.0` (git tag `0.3.0`), `author` = `Visnyk Team <team@visnyk.local>`, `companyName` = `Visnyk`.
 - `main.Version` ldflag, `ui.AppVersion` for `GetVersion()`.
 - Windows: `scripts/sign-windows.sh` via `osslsigncode` (env `CSC_LINK`, `CSC_KEY_PASSWORD`, timestamp `http://timestamp.digicert.com`).
 - macOS: `scripts/sign-macos.sh` via `codesign --options runtime` + `notarytool` (env `APPLE_ID`, `APPLE_APP_PASSWORD`, `TEAM_ID`), `hdiutil create` DMG + `stapler staple`.

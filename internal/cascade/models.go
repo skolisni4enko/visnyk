@@ -60,6 +60,14 @@ type DirectSender interface {
 	ResolveAndSend(phone, message string) error
 }
 
+// MediaSender is an optional fast path: senders that can deliver a file
+// with caption implement it. sendViaChannel prefers it when the batch
+// carries an attachment, otherwise it falls back to plain Send.
+type MediaSender interface {
+	Messenger
+	SendMedia(phone, caption string, att *Attachment) error
+}
+
 // BatchSender is an optional batch path for Telegram: import all contacts
 // in chunks, send to all resolved users, then delete the temporary
 // contacts in one batch. Avoids per-contact "Test" pollution and

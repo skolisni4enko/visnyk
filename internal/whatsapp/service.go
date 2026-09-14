@@ -349,6 +349,11 @@ func (s *Service) IsAvailable(phone string) (bool, error) {
 }
 
 // IsOnWhatsApp checks via whatsmeow.IsOnWhatsApp.
+// Besides the availability answer it warms the local LID mapping cache
+// (usync with addressing_mode=lid), which SendMessage needs to translate
+// a PN JID into a LID JID. Callers that send without a prior check
+// (media path) must warm the cache first, otherwise SendMessage fails
+// with "no LID found ... from server".
 func (s *Service) IsOnWhatsApp(phone string) (bool, error) {
 	if s.client == nil || !s.client.IsConnected() {
 		return false, fmt.Errorf("whatsapp not connected")
@@ -360,7 +365,8 @@ func (s *Service) IsOnWhatsApp(phone string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	result, err := s.client.IsOnWhatsApp(ctx, []string{jid.String()})
+	// whatsmeow expects international format with + prefix, not a JID string.
+	result, err := s.client.IsOnWhatsApp(ctx, []string{"+" + jid.User})
 	if err != nil {
 		return false, fmt.Errorf("IsOnWhatsApp: %w", err)
 	}
@@ -370,8 +376,28 @@ func (s *Service) IsOnWhatsApp(phone string) (bool, error) {
 	return result[0].IsIn, nil
 }
 
+// isNoLIDError reports the "no LID found ... from server" failure from
+// whatsmeow SendMessage/GetUserInfo: the server returned no LID mapping
+// for a PN JID, so the message could not be addressed.
+func isNoLIDError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "no LID found")
+}
+
 // Send sends a text message to phone (E.164). Accepts HTML from Quill editor — converts to WhatsApp markdown so appearance is identical with Telegram.
 func (s *Service) Send(phone, message string) error {
+	if message != "" {
+		// use format helper; if message is HTML, convert, else keep plain
+		// import is dynamic to avoid cycle — call via helper function
+		message = toWhatsAppMessage(message)
+	}
+	return s.sendConvertedText(phone, message)
+}
+
+// sendConvertedText delivers already-converted WhatsApp markdown.
+func (s *Service) sendConvertedText(phone, md string) error {
 	if s.client == nil || !s.client.IsConnected() {
 		return fmt.Errorf("whatsapp not connected")
 	}
@@ -379,21 +405,27 @@ func (s *Service) Send(phone, message string) error {
 	if err != nil {
 		return err
 	}
-	// Normalize HTML -> WhatsApp markdown for identical appearance across messengers
-	if message != "" {
-		// use format helper; if message is HTML, convert, else keep plain
-		// import is dynamic to avoid cycle — call via helper function
-		message = toWhatsAppMessage(message)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	_ = ctx
 	msg := &waProto.Message{
-		Conversation: &message,
+		Conversation: &md,
 	}
 	_, err = s.client.SendMessage(context.Background(), jid, msg)
 	if err != nil {
+		if isNoLIDError(err) {
+			// Cold LID cache (no prior IsOnWhatsApp for this number):
+			// warm it once and retry. A repeated failure means the
+			// server really has no LID — the number is not on WhatsApp.
+			if ok, werr := s.IsOnWhatsApp(phone); werr == nil && ok {
+				if _, rerr := s.client.SendMessage(context.Background(), jid, msg); rerr != nil {
+					return fmt.Errorf("send message: %w", rerr)
+				}
+				return nil
+			}
+			return fmt.Errorf("send message: not on WhatsApp (no LID mapping from server): %w", err)
+		}
 		return fmt.Errorf("send message: %w", err)
 	}
 	return nil

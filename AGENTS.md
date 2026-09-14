@@ -156,7 +156,7 @@ When user says "run QA" — run `webapp-testing` skill: open UI via Playwright, 
 
 ## Current product status
 
-v0.2.0. Broadcast WA+TG (parallel, resolve-first TG, flood protection, circuit breaker), direct WA/TG send, background health monitor, bulk import (paste/file/XLSX) with one-column tidy, history + logs + deb/Windows/macOS-source packaging. Viber — stub. MVP for 70-100 +380 numbers.
+v0.3.0. Broadcast WA+TG (parallel, resolve-first TG, flood protection, circuit breaker), file attachments (1 file per batch, template as caption, long-text auto-split, 16MB media / 100MB docs), direct WA/TG send, background health monitor, bulk import (paste/file/XLSX) with one-column tidy, history + logs + deb/Windows/macOS-source packaging. Viber — stub. MVP for 70-100 +380 numbers.
 
 ## Git & branch conventions
 

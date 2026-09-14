@@ -1,12 +1,13 @@
 Package: visnyk
-Version: 0.2.0
+Version: 0.3.0
 Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: Visnyk Team <team@visnyk.local>
-Description: broadcast messenger for WA, TG, Viber
+ Description: broadcast messenger for WA, TG, Viber
  Checks number availability and delivers to all available messengers.
  Uses a single personal account per messenger.
+ 0.3.0: broadcast file attachments with caption, long-text auto-split.
  0.2.0: Telegram resolve-first send, parallel WA/TG delivery with
  per-channel pacing and FLOOD_WAIT handling, dead-session circuit
  breaker, background health monitor. Delay 8-15s preserved.
