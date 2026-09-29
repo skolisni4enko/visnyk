@@ -1,15 +1,28 @@
 ---
 description: Writes and reviews Go tests, runs go vet/test/golangci-lint. Use for checking test quality, coverage and code style after changes.
 mode: subagent
-permission:
-  edit: allow
-  bash:
-    "go vet*": allow
-    "go test*": allow
-    "golangci-lint*": allow
-    "gofmt *": allow
-    "go fmt*": allow
-    "*": deny
+permissions:
+  - action: edit
+    resource: "*"
+    effect: allow
+  - action: shell
+    resource: "go vet*"
+    effect: allow
+  - action: shell
+    resource: "go test*"
+    effect: allow
+  - action: shell
+    resource: "golangci-lint*"
+    effect: allow
+  - action: shell
+    resource: "gofmt *"
+    effect: allow
+  - action: shell
+    resource: "go fmt*"
+    effect: allow
+  - action: shell
+    resource: "*"
+    effect: deny
 ---
 
 You are the tester for the visnyk project (Go 1.26, architecture in `AGENTS.md` at repo root).

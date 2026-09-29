@@ -1,18 +1,37 @@
 ---
 description: Security audit of Go code and integrations. Use for reviewing auth, token handling, rate limiting, storage and OWASP risks.
 mode: subagent
-permission:
-  edit: deny
-  bash:
-    "ls*": allow
-    "cat*": allow
-    "grep*": allow
-    "head*": allow
-    "tail*": allow
-    "git status*": allow
-    "git diff*": allow
-    "go vet*": allow
-    "*": ask
+permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+  - action: shell
+    resource: "ls*"
+    effect: allow
+  - action: shell
+    resource: "cat*"
+    effect: allow
+  - action: shell
+    resource: "grep*"
+    effect: allow
+  - action: shell
+    resource: "head*"
+    effect: allow
+  - action: shell
+    resource: "tail*"
+    effect: allow
+  - action: shell
+    resource: "git status*"
+    effect: allow
+  - action: shell
+    resource: "git diff*"
+    effect: allow
+  - action: shell
+    resource: "go vet*"
+    effect: allow
+  - action: shell
+    resource: "*"
+    effect: ask
 ---
 
 You are the security agent for the visnyk project (Go 1.26, architecture in `AGENTS.md` at repo root). Analysis only — you do not edit files.
