@@ -7,10 +7,11 @@ import "visnyk/internal/cascade"
 // cascade fast path. If a method is removed or its signature drifts, this
 // file fails to build.
 var (
-	_ cascade.Messenger     = (*Service)(nil)
-	_ cascade.DirectSender  = (*Service)(nil)
-	_ cascade.MediaSender   = (*Service)(nil)
-	_ cascade.BatchImporter = (*Service)(nil)
-	_ cascade.BatchSender   = (*Service)(nil)
-	_ cascade.BatchResolver = (*Service)(nil)
+	_ cascade.Messenger          = (*Service)(nil)
+	_ cascade.DirectSender       = (*Service)(nil)
+	_ cascade.MediaSender        = (*Service)(nil)
+	_ cascade.BatchImporter      = (*Service)(nil)
+	_ cascade.BatchSender        = (*Service)(nil)
+	_ cascade.BatchResolver      = (*Service)(nil)
+	_ cascade.BatchMediaResolver = (*Service)(nil)
 )

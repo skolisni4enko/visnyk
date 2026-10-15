@@ -3,6 +3,7 @@ package cascade
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -447,17 +448,282 @@ func TestHungChannelDoesNotBlockBatch(t *testing.T) {
 	}
 }
 
+func TestTelegramWorkerIsNotCappedByContactTimeout(t *testing.T) {
+	tg := &mockMessenger{name: ChannelTelegram}
+	svc := New(nil, tg, nil)
+	svc.contactTimeout = 10 * time.Millisecond
+	svc.tgMinDelay, svc.tgMaxDelay = 0, 0
+	tgSend := func(ctx context.Context, _, _ string) (bool, string, time.Time) {
+		select {
+		case <-time.After(50 * time.Millisecond):
+			return true, "", time.Now()
+		case <-ctx.Done():
+			return false, "telegram send canceled", time.Time{}
+		}
+	}
+
+	result := svc.sendOneCtxResolved(context.Background(), Contact{NormalizedPhone: "+380991234567"}, "Hi", nil, tgSend)
+	if result.Status != "sent" || result.Channel != ChannelTelegram {
+		t.Fatalf("Telegram wait longer than WA contact timeout must complete, got %+v", result)
+	}
+}
+
+func TestTelegramFloodWaitRetriesPastContactTimeout(t *testing.T) {
+	tg := &mockMessenger{name: ChannelTelegram}
+	svc := New(nil, tg, nil)
+	svc.contactTimeout = 10 * time.Millisecond
+	svc.tgMinDelay, svc.tgMaxDelay = 0, 0
+	var calls int
+	result := svc.sendOneCtxResolved(context.Background(), Contact{NormalizedPhone: "+380991234567"}, "Hi", nil, func(ctx context.Context, _, _ string) (bool, string, time.Time) {
+		err := svc.withFloodRetry(ctx, ChannelTelegram, func() error {
+			calls++
+			if calls == 1 {
+				return newFloodError()
+			}
+			return nil
+		})
+		if err != nil {
+			return false, err.Error(), time.Time{}
+		}
+		return true, "", time.Now()
+	})
+	if result.Status != "sent" || result.Channel != ChannelTelegram || calls != 2 {
+		t.Fatalf("flood wait must finish and retry after the WA timeout, calls=%d result=%+v", calls, result)
+	}
+}
+
+func TestPartialMediaDeliveryIsNotRetried(t *testing.T) {
+	const phone = "+380991234567"
+	tg := &mediaMock{
+		name:      ChannelTelegram,
+		available: map[string]bool{phone: true},
+		mediaErr:  &PartialDeliveryError{Err: errors.New("file sent; follow-up text failed")},
+	}
+	svc := New(nil, tg, nil)
+	svc.minDelay, svc.maxDelay = 0, 0
+	svc.tgMinDelay, svc.tgMaxDelay = 0, 0
+	att := &Attachment{FileName: "picture.jpg", MIME: "image/jpeg", Size: 1, Data: []byte{1}}
+
+	results := svc.SendBatchWithAttachment(context.Background(), []Contact{{NormalizedPhone: phone}}, "caption", att)
+	if len(results) != 1 || results[0].Status != "sent" || results[0].Channel != ChannelTelegram {
+		t.Fatalf("file delivery must be reported as sent after follow-up failure, got %+v", results)
+	}
+	if !strings.Contains(results[0].Error, "follow-up text failed") {
+		t.Errorf("partial delivery note missing: %q", results[0].Error)
+	}
+	if len(tg.mediaCalls) != 1 {
+		t.Errorf("partial media delivery must not be retried, got %d sends", len(tg.mediaCalls))
+	}
+}
+
+func TestMediaFloodWaitDoesNotRetryBeforeWaiting(t *testing.T) {
+	svc := New(nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	sent, errStr, _ := svc.sendMediaWithFloodRetry(ctx, ChannelTelegram, func() error {
+		calls++
+		return newFloodError()
+	})
+	if sent {
+		t.Fatalf("canceled flood wait must not report delivery")
+	}
+	if calls != 1 {
+		t.Errorf("must not retry before honoring FLOOD_WAIT, got %d attempts", calls)
+	}
+	if !strings.Contains(errStr, "context canceled") {
+		t.Errorf("want cancellation reported while waiting, got %q", errStr)
+	}
+}
+
+func TestFloodRetryWaitsBeforeSecondAttempt(t *testing.T) {
+	svc := New(nil, nil, nil)
+	var events []string
+	svc.sleepFloodFn = func(_ context.Context, _ Channel, wait time.Duration) error {
+		events = append(events, "wait")
+		if wait != 0 {
+			t.Errorf("FLOOD_WAIT_0 duration = %v, want 0", wait)
+		}
+		return nil
+	}
+	var calls int
+	err := svc.withFloodRetry(context.Background(), ChannelTelegram, func() error {
+		calls++
+		events = append(events, fmt.Sprintf("attempt-%d", calls))
+		if calls == 1 {
+			return newFloodError()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withFloodRetry() error = %v", err)
+	}
+	if got, want := strings.Join(events, ","), "attempt-1,wait,attempt-2"; got != want {
+		t.Errorf("event order = %q, want %q", got, want)
+	}
+}
+
+func TestFloodRetryHonorsSecondServerWait(t *testing.T) {
+	svc := New(nil, nil, nil)
+	var events []string
+	svc.sleepFloodFn = func(_ context.Context, _ Channel, _ time.Duration) error {
+		events = append(events, "wait")
+		return nil
+	}
+	calls := 0
+	err := svc.withFloodRetry(context.Background(), ChannelTelegram, func() error {
+		calls++
+		events = append(events, fmt.Sprintf("attempt-%d", calls))
+		return newFloodError()
+	})
+	if err == nil {
+		t.Fatal("second FLOOD_WAIT must return an error after its wait")
+	}
+	if got, want := strings.Join(events, ","), "attempt-1,wait,attempt-2,wait"; got != want {
+		t.Errorf("event order = %q, want %q", got, want)
+	}
+}
+
+func TestFloodRetryHonorsUpdatedSecondWaitDuration(t *testing.T) {
+	svc := New(nil, nil, nil)
+	var waits []time.Duration
+	svc.sleepFloodFn = func(_ context.Context, _ Channel, wait time.Duration) error {
+		waits = append(waits, wait)
+		return nil
+	}
+	calls := 0
+	err := svc.withFloodRetry(context.Background(), ChannelTelegram, func() error {
+		calls++
+		if calls == 1 {
+			return tgerr.New(420, "FLOOD_WAIT_2")
+		}
+		return tgerr.New(420, "FLOOD_WAIT_120")
+	})
+	if err == nil {
+		t.Fatal("second FLOOD_WAIT must return an error")
+	}
+	if len(waits) != 2 || waits[0] != 2*time.Second || waits[1] != 120*time.Second {
+		t.Errorf("waits = %v, want [2s 2m]", waits)
+	}
+}
+
+func TestFloodCooldownUsesLongerSecondWait(t *testing.T) {
+	svc := New(nil, nil, nil)
+	svc.consecFlood = 2
+	var waits []time.Duration
+	svc.sleepFloodFn = func(_ context.Context, _ Channel, wait time.Duration) error {
+		waits = append(waits, wait)
+		return nil
+	}
+	calls := 0
+	err := svc.withFloodRetry(context.Background(), ChannelTelegram, func() error {
+		calls++
+		switch calls {
+		case 1:
+			return tgerr.New(420, "FLOOD_WAIT_2")
+		case 2:
+			return tgerr.New(420, "FLOOD_WAIT_600")
+		default:
+			return nil
+		}
+	})
+	if err != nil {
+		t.Fatalf("withFloodRetry() error = %v", err)
+	}
+	if len(waits) != 2 || waits[0] != 2*time.Second || waits[1] != 600*time.Second {
+		t.Errorf("waits = %v, want [2s 10m]", waits)
+	}
+}
+
+func TestFloodCooldownRetryMarksFinalAuthErrorDead(t *testing.T) {
+	svc := New(nil, nil, nil)
+	svc.consecFlood = 2
+	var events []string
+	svc.sleepFloodFn = func(_ context.Context, _ Channel, wait time.Duration) error {
+		events = append(events, "wait:"+wait.String())
+		return nil
+	}
+	calls := 0
+	err := svc.withFloodRetry(context.Background(), ChannelTelegram, func() error {
+		calls++
+		events = append(events, fmt.Sprintf("attempt-%d", calls))
+		if calls < 3 {
+			return newFloodError()
+		}
+		return tgerr.New(401, "AUTH_KEY_UNREGISTERED")
+	})
+	if !common.IsTelegramAuthError(err) {
+		t.Fatalf("want final auth error, got %v", err)
+	}
+	if !svc.channelDead(ChannelTelegram) {
+		t.Error("final auth error after flood cooldown must mark Telegram dead")
+	}
+	if calls != 3 || len(events) != 5 {
+		t.Errorf("want two flood waits and three attempts, calls=%d events=%v", calls, events)
+	}
+}
+
+func TestFloodAfterCooldownStillHonorsServerWait(t *testing.T) {
+	svc := New(nil, nil, nil)
+	svc.consecFlood = 2
+	var waits []time.Duration
+	svc.sleepFloodFn = func(_ context.Context, _ Channel, wait time.Duration) error {
+		waits = append(waits, wait)
+		return nil
+	}
+	calls := 0
+	err := svc.withFloodRetry(context.Background(), ChannelTelegram, func() error {
+		calls++
+		return newFloodError()
+	})
+	if err == nil {
+		t.Fatal("final FLOOD_WAIT after cooldown must remain an error")
+	}
+	if calls != 3 {
+		t.Errorf("want exactly three attempts including cooldown retry, got %d", calls)
+	}
+	if len(waits) != 3 || waits[1] < 5*time.Minute {
+		t.Errorf("want initial, 5-minute cooldown, and final server waits, got %v", waits)
+	}
+}
+
+func TestSuccessfulMediaSendResetsTelegramFloodCounter(t *testing.T) {
+	svc := New(nil, nil, nil)
+	svc.noteFlood(ChannelTelegram, true)
+	if svc.consecFlood != 1 {
+		t.Fatal("test setup did not record a Telegram flood")
+	}
+	sent, errStr, _ := svc.sendMediaWithFloodRetry(context.Background(), ChannelTelegram, func() error { return nil })
+	if !sent || errStr != "" {
+		t.Fatalf("want successful media send, got sent=%v err=%q", sent, errStr)
+	}
+	if svc.consecFlood != 0 {
+		t.Errorf("successful media send must reset consecutive flood count, got %d", svc.consecFlood)
+	}
+}
+
 // batchResolverMock implements Messenger + BatchResolver + DirectSender to
 // verify the batch broadcast path: BatchImport once, SendResolved per found
 // contact, and zero ResolveAndSend (resolvePhone) calls.
 type batchResolverMock struct {
-	mu              sync.Mutex
-	name            Channel
-	found           map[string]bool
-	importCalls     int
-	beginBatchCalls int
-	resolveCalls    int
-	sent            []string
+	mu                   sync.Mutex
+	name                 Channel
+	found                map[string]bool
+	importCalls          int
+	beginBatchCalls      int
+	endBatchCalls        int
+	deleteCalls          int
+	deleteCompletedCalls int
+	deleteContacts       []ImportedContact
+	sendBeforeDelete     bool
+	deleteStarted        chan struct{}
+	deleteRelease        chan struct{}
+	deleteErr            error
+	importErr            error
+	importStarted        chan struct{}
+	importRelease        chan struct{}
+	resolveCalls         int
+	sent                 []string
 }
 
 func (m *batchResolverMock) Name() Channel { return m.name }
@@ -477,30 +743,64 @@ func (m *batchResolverMock) ResolveAndSend(phone, _ string) error {
 	m.sent = append(m.sent, phone)
 	return nil
 }
-func (m *batchResolverMock) BeginBatch() {
+func (m *batchResolverMock) BeginBatch(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.beginBatchCalls++
+	return nil
+}
+func (m *batchResolverMock) EndBatch() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.endBatchCalls++
 }
 func (m *batchResolverMock) BatchImport(_ context.Context, phones []string) (map[string]bool, []ImportedContact, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.importCalls++
 	found := make(map[string]bool, len(phones))
+	var toDelete []ImportedContact
 	for _, p := range phones {
 		// Mirror the real Telegram service: the found map is keyed by
 		// canonical E.164, whatever form the caller passed in.
 		key := common.CleanPhoneE164(p)
 		if m.found[key] {
 			found[key] = true
+			toDelete = append(toDelete, ImportedContact{UserID: int64(len(toDelete) + 1), AccessHash: 1})
 		}
 	}
-	return found, nil, nil
+	started, release, importErr := m.importStarted, m.importRelease, m.importErr
+	m.mu.Unlock()
+	if started != nil {
+		close(started)
+	}
+	if release != nil {
+		<-release
+	}
+	return found, toDelete, importErr
 }
-func (m *batchResolverMock) BatchDelete(_ context.Context, _ []ImportedContact) error { return nil }
-func (m *batchResolverMock) SendResolved(phone, _ string) error {
+func (m *batchResolverMock) BatchDelete(_ context.Context, contacts []ImportedContact) error {
+	m.mu.Lock()
+	m.deleteCalls++
+	m.deleteContacts = append(m.deleteContacts, contacts...)
+	started, release := m.deleteStarted, m.deleteRelease
+	m.mu.Unlock()
+	if started != nil {
+		close(started)
+	}
+	if release != nil {
+		<-release
+	}
+	m.mu.Lock()
+	m.deleteCompletedCalls++
+	m.mu.Unlock()
+	return m.deleteErr
+}
+func (m *batchResolverMock) SendResolved(_ context.Context, phone, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if len(m.deleteContacts) > 0 && m.deleteCompletedCalls == 0 {
+		m.sendBeforeDelete = true
+	}
 	key := common.CleanPhoneE164(phone)
 	if !m.found[key] {
 		return errors.New("user not found for " + key)
@@ -576,6 +876,9 @@ func TestBroadcastBatchResolverNoResolvePhone(t *testing.T) {
 	}
 	if tg.resolveCalls != 0 {
 		t.Errorf("batch path must not call ResolveAndSend (resolvePhone), got %d", tg.resolveCalls)
+	}
+	if tg.sendBeforeDelete {
+		t.Error("Telegram sends must start only after newly imported contacts are removed")
 	}
 	if len(tg.sent) != 10 {
 		t.Errorf("want 10 SendResolved sends, got %d", len(tg.sent))
@@ -654,8 +957,8 @@ func TestBroadcastBatchPathUsedForSingleContact(t *testing.T) {
 	if !contains(string(res.Channel), "whatsapp") || !contains(string(res.Channel), "telegram") {
 		t.Errorf("want whatsapp+telegram, got %s", res.Channel)
 	}
-	if tg.importCalls != 1 || tg.beginBatchCalls != 1 {
-		t.Errorf("want batch path (1 import, 1 begin), got import=%d begin=%d", tg.importCalls, tg.beginBatchCalls)
+	if tg.importCalls != 1 || tg.beginBatchCalls != 1 || tg.endBatchCalls != 1 {
+		t.Errorf("want batch path lifecycle (1 import/begin/end), got import=%d begin=%d end=%d", tg.importCalls, tg.beginBatchCalls, tg.endBatchCalls)
 	}
 	if tg.resolveCalls != 0 {
 		t.Errorf("batch path must not call ResolveAndSend, got %d", tg.resolveCalls)
@@ -721,5 +1024,40 @@ func TestBroadcastWhatsAppNotFoundIsReported(t *testing.T) {
 	}
 	if !strings.Contains(res.Error, "not found in WhatsApp") {
 		t.Errorf("want WhatsApp-not-found note, got %q", res.Error)
+	}
+}
+
+func TestDirectTelegramUsesBatchResolverForSingleContact(t *testing.T) {
+	const phone = "+380991234567"
+	tg := &batchResolverMock{name: ChannelTelegram, found: map[string]bool{phone: true}}
+	svc := New(nil, tg, nil)
+	svc.minDelay, svc.maxDelay = 0, 0
+	svc.tgMinDelay, svc.tgMaxDelay = 0, 0
+
+	results := svc.SendBatchDirect(context.Background(), []Contact{{NormalizedPhone: phone}}, "message", ChannelTelegram)
+	if len(results) != 1 || results[0].Status != "sent" || results[0].Channel != ChannelTelegram {
+		t.Fatalf("want Telegram-only direct send, got %+v", results)
+	}
+	if tg.importCalls != 1 || tg.beginBatchCalls != 1 || tg.resolveCalls != 0 || len(tg.sent) != 1 {
+		t.Errorf("want batch resolve/send only, import=%d begin=%d resolve=%d sent=%d", tg.importCalls, tg.beginBatchCalls, tg.resolveCalls, len(tg.sent))
+	}
+	if tg.deleteCalls != 1 || tg.deleteCompletedCalls != 1 || tg.sendBeforeDelete {
+		t.Errorf("direct Telegram must delete temporary contacts before send, delete calls=%d complete=%d sent early=%v", tg.deleteCalls, tg.deleteCompletedCalls, tg.sendBeforeDelete)
+	}
+}
+
+func TestTelegramPacingCancellationIsReported(t *testing.T) {
+	tg := &batchResolverMock{name: ChannelTelegram}
+	svc := New(nil, tg, nil)
+	svc.tgMinDelay, svc.tgMaxDelay = time.Second, time.Second
+	svc.paceMu.Lock()
+	svc.lastSend[ChannelTelegram] = time.Now()
+	svc.paceMu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(10*time.Millisecond, cancel)
+
+	sent, errStr, _ := svc.sendResolvedViaChannel(ctx, tg, "+380991234567", "Hi")
+	if sent || !strings.Contains(errStr, "context canceled") {
+		t.Fatalf("pacing cancellation must be visible, sent=%v error=%q", sent, errStr)
 	}
 }

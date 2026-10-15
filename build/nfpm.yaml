@@ -1,13 +1,15 @@
 name: visnyk
 arch: amd64
 platform: linux
-version: 0.4.0
+version: 0.4.1
 section: utils
 priority: optional
 maintainer: Visnyk Team <team@visnyk.local>
 description: |
   Broadcast messenger for WA, TG, Viber.
   Checks number availability and delivers to all available messengers.
+  0.4.1: Telegram media uses batch-resolved users; temporary contacts are
+  deleted before delivery and Telegram flood waits are honored.
   0.4.0: Telegram bulk sends batch-import contacts (20 per chunk) instead
   of per-number contacts.resolvePhone, avoiding the resolvePhone rate limit
   that dropped Telegram delivery by timeout on large batches.

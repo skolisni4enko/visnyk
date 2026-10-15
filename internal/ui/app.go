@@ -25,7 +25,7 @@ import (
 )
 
 // Version injected from main.
-var AppVersion = "0.4.0"
+var AppVersion = "0.4.1"
 
 // App is the Wails-bound application. All methods are exposed to the frontend.
 type App struct {
@@ -535,6 +535,41 @@ func (a *App) startBatchInternal(contacts []cascade.Contact, template string, lo
 		}
 
 		allResults = sendFn(ctx, onProgress)
+		var cleanupNote string
+		for _, result := range allResults {
+			idx := strings.Index(result.Error, "temporary contacts cleanup failed:")
+			if idx < 0 {
+				continue
+			}
+			cleanupNote = result.Error[idx:]
+			message := fmt.Sprintf("batch=%s %s: %s", batchID, result.Contact.NormalizedPhone, cleanupNote)
+			a.logFile("ERROR", source, message)
+			if a.store != nil {
+				_ = a.store.Log("ERROR", source, message)
+			}
+			break
+		}
+		if cleanupNote != "" && a.store != nil {
+			updated, err := a.store.AddBatchError(batchID, cleanupNote)
+			if err != nil {
+				a.logFile("ERROR", source, fmt.Sprintf("batch=%s failed to update history with cleanup error: %v", batchID, err))
+			} else if updated == 0 && len(allResults) > 0 {
+				// Cancellation can happen before any per-contact progress row is
+				// written. Keep the cleanup failure visible in history anyway.
+				result := allResults[0]
+				_ = a.store.AddHistory(storage.HistoryEntry{
+					Phone:          result.Contact.PhoneRaw,
+					Normalized:     result.Contact.NormalizedPhone,
+					Name:           result.Contact.Name,
+					Channel:        string(result.Channel),
+					Status:         result.Status,
+					Error:          result.Error,
+					SentAt:         result.SentAt,
+					MessagePreview: preview,
+					BatchID:        batchID,
+				})
+			}
+		}
 
 		cancelled := ctx.Err() != nil
 		if cancelled {

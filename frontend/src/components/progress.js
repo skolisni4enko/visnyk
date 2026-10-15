@@ -187,22 +187,18 @@ function handleDone(data) {
       else { bulkProgress.textContent = `Готово: ${results.length}/${total}`; bulkProgress.className = 'small ok'; }
     }
   }
-  // ensure all results rendered (in case progress events missed)
-  if (results.length > 0) {
-    // if table empty, render all
-    const tbody = el('cascade-table')?.querySelector('tbody');
-    if (tbody && tbody.children.length === 0) {
-      results.forEach((r, i) => {
-        const c = r.Contact || r.contact || {};
-        const ch = r.Channel || r.channel || '';
-        const st = r.Status || r.status || '';
-        const er = r.Error || r.error || '';
-        const ph = c.PhoneRaw || c.phoneRaw || c.Phone || c.NormalizedPhone || c.normalizedPhone || '';
-        const nm = c.Name || c.name || '';
-        appendRow(i+1, nm, ph, ch, st, er);
-      });
-    }
-  }
+  // Reconcile progress rows with final results. Cleanup errors are attached
+  // after the last per-contact progress event, so final results may contain
+  // information that the live row did not yet show.
+  results.forEach((r, i) => {
+    const c = r.Contact || r.contact || {};
+    const ch = r.Channel || r.channel || '';
+    const st = r.Status || r.status || '';
+    const er = r.Error || r.error || '';
+    const ph = c.PhoneRaw || c.phoneRaw || c.Phone || c.NormalizedPhone || c.normalizedPhone || '';
+    const nm = c.Name || c.name || '';
+    appendRow(i + 1, nm, ph, ch, st, er);
+  });
   // refresh main history table (server pagination, reset to page 1)
   const doReload = () => {
     try {
@@ -259,6 +255,7 @@ function appendRow(idx, name, phone, channel, status, err) {
   const tbody = el('cascade-table')?.querySelector('tbody');
   if (!tbody) return;
   const tr = document.createElement('tr');
+  tr.dataset.index = String(idx);
   const isSent = status === 'sent';
   tr.innerHTML = `
     <td>${idx}</td>
@@ -268,7 +265,9 @@ function appendRow(idx, name, phone, channel, status, err) {
     <td><span class="small ${isSent ? 'ok' : 'err'}" style="font-weight:600">${escapeHtml(status)}</span></td>
     <td class="small" title="${escapeHtml(err)}">${escapeHtml(err || '')}</td>
   `;
-  tbody.appendChild(tr);
+  const existing = tbody.querySelector(`tr[data-index="${idx}"]`);
+  if (existing) existing.replaceWith(tr);
+  else tbody.appendChild(tr);
   // auto scroll
   const wrap = tbody.closest('.table-wrap');
   if (wrap) wrap.scrollTop = wrap.scrollHeight;

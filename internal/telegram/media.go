@@ -2,7 +2,9 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"time"
@@ -29,7 +31,7 @@ const tgTextMax = 4096
 // pollution), single ImportContacts fallback only for privacy-hidden
 // numbers, upload via gotd uploader, photo for images and document
 // (with filename + MIME) for everything else.
-func (s *Service) SendMedia(phone, caption string, att *cascade.Attachment) error {
+func (s *Service) SendMedia(phone, caption string, att *cascade.Attachment) (sendErr error) {
 	s.mu.Lock()
 	client := s.client
 	connected := s.connected && s.loggedIn
@@ -37,6 +39,57 @@ func (s *Service) SendMedia(phone, caption string, att *cascade.Attachment) erro
 	if !connected || client == nil {
 		return fmt.Errorf("telegram not connected/logged in")
 	}
+	phone = normalizePhone(phone)
+	if phone == "" {
+		return fmt.Errorf("empty phone")
+	}
+
+	rctx, cancelResolve := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelResolve()
+	peer, uid, accessHash, newlyImported, err := s.resolveMediaPeer(rctx, phone)
+	if err != nil {
+		return err
+	}
+	// If privacy-hidden lookup imported a temporary contact, wait for cleanup
+	// before returning, even when upload or delivery fails.
+	if newlyImported {
+		defer func() {
+			cctx, ccancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer ccancel()
+			if _, derr := client.API().ContactsDeleteContacts(cctx, []tg.InputUserClass{&tg.InputUser{UserID: uid, AccessHash: accessHash}}); derr != nil {
+				sendErr = errors.Join(sendErr, fmt.Errorf("delete temporary Telegram contact %s: %w", phone, derr))
+			}
+		}()
+	}
+	return s.sendMediaToPeer(context.Background(), client, peer, caption, att)
+}
+
+// SendResolvedMedia sends an attachment to a user resolved by BatchImport.
+// It never calls resolvePhone or imports a contact; the caller owns batch
+// cleanup and deletes newly imported contacts before returning.
+func (s *Service) SendResolvedMedia(ctx context.Context, phone, caption string, att *cascade.Attachment) error {
+	s.mu.Lock()
+	client := s.client
+	connected := s.connected && s.loggedIn
+	s.mu.Unlock()
+	if !connected || client == nil {
+		return fmt.Errorf("telegram not connected/logged in")
+	}
+	key := batchKey(phone)
+	if key == "" {
+		return fmt.Errorf("empty phone")
+	}
+	s.batchMu.Lock()
+	usr := s.batchUsers[key]
+	s.batchMu.Unlock()
+	if usr == nil {
+		return fmt.Errorf("user not found for %s", key)
+	}
+	peer := &tg.InputPeerUser{UserID: usr.ID, AccessHash: usr.AccessHash}
+	return s.sendMediaToPeer(ctx, client, peer, caption, att)
+}
+
+func (s *Service) sendMediaToPeer(ctx context.Context, client *telegram.Client, peer *tg.InputPeerUser, caption string, att *cascade.Attachment) error {
 	if att == nil {
 		return fmt.Errorf("nil attachment")
 	}
@@ -54,19 +107,8 @@ func (s *Service) SendMedia(phone, caption string, att *cascade.Attachment) erro
 	if len(data) == 0 {
 		return fmt.Errorf("empty attachment %q", att.FileName)
 	}
-	phone = normalizePhone(phone)
-	if phone == "" {
-		return fmt.Errorf("empty phone")
-	}
 
-	rctx, cancelResolve := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancelResolve()
-	peer, uid, accessHash, newlyImported, err := s.resolveMediaPeer(rctx, phone)
-	if err != nil {
-		return err
-	}
-
-	upCtx, cancelUp := context.WithTimeout(context.Background(), 3*time.Minute)
+	upCtx, cancelUp := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancelUp()
 	inputFile, err := uploader.NewUploader(client.API()).FromBytes(upCtx, att.FileName, data)
 	if err != nil {
@@ -94,7 +136,7 @@ func (s *Service) SendMedia(phone, caption string, att *cascade.Attachment) erro
 		kind = cascade.ClassifyAttachment(att.FileName, att.MIME)
 	}
 	sender := tgmessage.NewSender(client.API())
-	sendCtx, cancelSend := context.WithTimeout(context.Background(), 60*time.Second)
+	sendCtx, cancelSend := context.WithTimeout(ctx, 60*time.Second)
 	defer cancelSend()
 	if kind == cascade.AttachmentImage {
 		if _, err := sender.To(peer).Media(sendCtx, tgmessage.UploadedPhoto(inputFile, captionOpts...)); err != nil {
@@ -110,33 +152,67 @@ func (s *Service) SendMedia(phone, caption string, att *cascade.Attachment) erro
 		}
 	}
 	for _, tail := range tails {
-		// Chunks are cut at text boundaries, but a long formatted run can
-		// still straddle the seam — drop a trailing broken tag, and a
-		// stray opener renders literally rather than failing the send.
-		if err := s.sendStyledToPeer(sendCtx, client, peer, trimBrokenTag(tail)); err != nil {
-			return fmt.Errorf("file %q sent but follow-up text failed: %w", att.FileName, err)
+		if err := s.sendStyledToPeerWithFloodRetry(ctx, client, peer, trimBrokenTag(tail)); err != nil {
+			return &cascade.PartialDeliveryError{Err: fmt.Errorf("file %q sent but follow-up text failed: %w", att.FileName, err)}
 		}
 	}
+	return nil
+}
 
-	// Cleanup: delete the temporary contact if we just created it
-	// (fallback path only), same as ResolveAndSend.
-	if newlyImported {
-		go func() {
-			cctx, ccancel := context.WithTimeout(context.Background(), 8*time.Second)
-			defer ccancel()
-			s.mu.Lock()
-			cl := s.client
-			ok := s.connected && s.loggedIn
-			s.mu.Unlock()
-			if !ok || cl == nil {
-				return
-			}
-			if _, derr := cl.API().ContactsDeleteContacts(cctx, []tg.InputUserClass{&tg.InputUser{UserID: uid, AccessHash: accessHash}}); derr != nil {
-				fmt.Printf("[telegram] send-media cleanup delete %s -> %v\n", phone, derr)
-			} else {
-				fmt.Printf("[telegram] send-media cleanup delete %s ok\n", phone)
-			}
-		}()
+func (s *Service) sendStyledToPeerWithFloodRetry(ctx context.Context, client *telegram.Client, peer *tg.InputPeerUser, htmlStr string) error {
+	send := func(parent context.Context) error {
+		reqCtx, cancel := context.WithTimeout(parent, 60*time.Second)
+		defer cancel()
+		return s.sendStyledToPeer(reqCtx, client, peer, htmlStr)
+	}
+	err := send(ctx)
+	if err == nil {
+		return nil
+	}
+	return retryFloodWait(ctx, err, waitTelegramFlood, send)
+}
+
+func retryFloodWait(ctx context.Context, err error, wait func(context.Context, time.Duration) error, retry func(context.Context) error) error {
+	d, isFlood := common.FloodWaitDuration(err)
+	if !isFlood {
+		return err
+	}
+	if err := wait(ctx, d); err != nil {
+		return err
+	}
+	return retry(ctx)
+}
+
+// retryImportWithFloodWait retries a failed contact import once. If Telegram
+// returns another FLOOD_WAIT, it honors that second server wait and returns
+// the error so callers stop before issuing another contacts.* request.
+func retryImportWithFloodWait(ctx context.Context, initial error, wait func(context.Context, time.Duration) error, retry func(context.Context) error) error {
+	firstWait, isFlood := common.FloodWaitDuration(initial)
+	if !isFlood {
+		return initial
+	}
+	if err := wait(ctx, firstWait); err != nil {
+		return errors.Join(initial, err)
+	}
+	err := retry(ctx)
+	if err == nil {
+		return nil
+	}
+	secondWait, repeatedFlood := common.FloodWaitDuration(err)
+	if repeatedFlood {
+		if waitErr := wait(ctx, secondWait); waitErr != nil {
+			return errors.Join(err, waitErr)
+		}
+	}
+	return err
+}
+
+func waitTelegramFlood(ctx context.Context, d time.Duration) error {
+	wait := d + 2*time.Second + time.Duration(rand.Int63n(int64(3*time.Second)))
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(wait):
 	}
 	return nil
 }

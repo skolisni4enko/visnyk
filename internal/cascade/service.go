@@ -2,6 +2,7 @@ package cascade
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"sort"
 	"sync"
@@ -32,8 +33,9 @@ type Service struct {
 	lastSend map[Channel]time.Time
 
 	// consecutive Telegram floods: 3 in a row triggers a 5min cooldown.
-	floodMu     sync.Mutex
-	consecFlood int
+	floodMu      sync.Mutex
+	consecFlood  int
+	sleepFloodFn func(context.Context, Channel, time.Duration) error
 
 	// dead channels (circuit breaker): set on fatal auth errors
 	// (e.g. 401 AUTH_KEY_UNREGISTERED) so remaining contacts skip the
@@ -41,8 +43,8 @@ type Service struct {
 	deadMu sync.Mutex
 	dead   map[Channel]bool
 
-	// contactTimeout caps one contact across all channels: a hung
-	// messenger never stalls the whole batch. Zero means default.
+	// contactTimeout caps each WhatsApp/Viber worker. Telegram does not use
+	// this cap because server-ordered FLOOD_WAIT must be honored in full.
 	contactTimeout time.Duration
 }
 
@@ -59,14 +61,13 @@ func New(wa, tg, vb Messenger) *Service {
 		tgMaxDelay: 15 * time.Second,
 		lastSend:   make(map[Channel]time.Time),
 		dead:       make(map[Channel]bool),
-		// 90s covers WA check 10s + send 15s + TG resolve 10s + send 15s
-		// + pacing 15s + margin; a slower contact is a hung contact.
+		// Bound stuck WhatsApp/Viber workers without truncating Telegram floods.
 		contactTimeout: 90 * time.Second,
 	}
 }
 
-// contactTimeoutOrDefault returns the per-contact cap (90s when unset,
-// so Service literals in tests keep working).
+// contactTimeoutOrDefault returns the non-Telegram worker cap (90s when
+// unset, so Service literals in tests keep working).
 func (s *Service) contactTimeoutOrDefault() time.Duration {
 	if s.contactTimeout > 0 {
 		return s.contactTimeout
@@ -162,20 +163,36 @@ func (s *Service) SendBatchDirectWithProgressAndBatchWithAttachment(ctx context.
 	// batch delete (50 per chunk). Avoids per-contact "Test" pollution
 	// and respects flood limits. Skipped when the batch carries a file:
 	// media goes through the per-contact loop so captions stay attached.
-	if ch == ChannelTelegram && att == nil && len(contacts) >= 10 {
-		if bi, ok := s.telegram.(BatchImporter); ok {
-			res := s.sendBatchDirectBatchHybrid(ctx, contacts, template, ch, att, wrappedProgress, bi)
+	if ch == ChannelTelegram && len(contacts) > 0 {
+		if att != nil {
+			if media, ok := s.telegram.(BatchMediaResolver); ok {
+				res := s.sendBatchDirectBatchHybrid(ctx, contacts, template, ch, att, wrappedProgress, media)
+				for i := range res {
+					res[i].BatchID = batchID
+				}
+				return res
+			}
+		} else if br, ok := s.telegram.(BatchResolver); ok {
+			res := s.sendBatchDirectBatchHybrid(ctx, contacts, template, ch, nil, wrappedProgress, br)
 			for i := range res {
 				res[i].BatchID = batchID
 			}
 			return res
-		}
-		if bs, ok := s.telegram.(BatchSender); ok {
-			res := s.sendBatchDirectBatch(ctx, contacts, template, ch, wrappedProgress, bs)
-			for i := range res {
-				res[i].BatchID = batchID
+		} else if len(contacts) >= 10 {
+			if bi, ok := s.telegram.(BatchImporter); ok {
+				res := s.sendBatchDirectBatchHybrid(ctx, contacts, template, ch, nil, wrappedProgress, bi)
+				for i := range res {
+					res[i].BatchID = batchID
+				}
+				return res
 			}
-			return res
+			if bs, ok := s.telegram.(BatchSender); ok {
+				res := s.sendBatchDirectBatch(ctx, contacts, template, ch, wrappedProgress, bs)
+				for i := range res {
+					res[i].BatchID = batchID
+				}
+				return res
+			}
 		}
 	}
 	results := make([]SendResult, 0, len(contacts))
@@ -308,7 +325,7 @@ func (s *Service) sendBatchDirectBatch(ctx context.Context, contacts []Contact, 
 // paced send, batch delete. Keeps the import benefit (no per-contact
 // ImportContacts) but sends each message with per-channel pacing
 // (paceChannel 8-15s capped at 30s) to avoid PEER_FLOOD.
-func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Contact, template string, ch Channel, att *Attachment, onProgress func(Progress), bi BatchImporter) []SendResult {
+func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Contact, template string, ch Channel, att *Attachment, onProgress func(Progress), bi BatchImporter) (results []SendResult) {
 	total := len(contacts)
 	s.resetDead()
 	if onProgress != nil {
@@ -332,15 +349,25 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 	// import once and send to cached users — no per-contact resolvePhone.
 	br, resolved := bi.(BatchResolver)
 	if resolved {
-		br.BeginBatch()
+		if err := br.BeginBatch(ctx); err != nil {
+			for _, c := range contacts {
+				results = append(results, SendResult{Contact: c, Channel: ch, Status: "failed", Error: channelLabel(ch) + ": " + err.Error(), SentAt: time.Now()})
+			}
+			return results
+		}
+		defer br.EndBatch()
 	}
 	// Batch import all contacts
+	results = make([]SendResult, 0, len(contacts))
 	found, toDelete, err := bi.BatchImport(ctx, phones)
+	cleanupErr := finishBatchDelete(bi, toDelete)
+	if cleanupErr != nil {
+		defer func() { recordBatchCleanupFailure(&results, contacts, ch, cleanupErr) }()
+	}
 	if err != nil {
 		if common.IsTelegramAuthError(err) {
 			s.markDead(ch)
 			errStr := string(ch) + ": " + SessionLostError + " (" + err.Error() + ")"
-			results := make([]SendResult, 0, len(contacts))
 			for i, c := range contacts {
 				eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
 				res := SendResult{Contact: c, Channel: ch, Status: "failed", Error: errStr, SentAt: time.Now()}
@@ -352,7 +379,6 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 			return results
 		}
 		// batch import failed globally
-		results := make([]SendResult, 0, len(contacts))
 		for i, c := range contacts {
 			eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
 			errStr := "batch import failed: " + err.Error()
@@ -367,20 +393,14 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 	// Per-contact paced send
 	m := s.messengerFor(ch)
 	if m == nil {
-		results := make([]SendResult, 0, len(contacts))
 		for _, c := range contacts {
 			results = append(results, SendResult{Contact: c, Channel: ch, Status: "failed", Error: "messenger " + string(ch) + " not initialized", SentAt: time.Now()})
 		}
-		// cleanup batch import
-		_ = bi.BatchDelete(context.Background(), toDelete)
 		return results
 	}
-	results := make([]SendResult, 0, len(contacts))
 	for i, c := range contacts {
 		select {
 		case <-ctx.Done():
-			// batch delete for already imported contacts
-			_ = bi.BatchDelete(context.Background(), toDelete)
 			return results
 		default:
 		}
@@ -390,6 +410,14 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 			results = append(results, res)
 			if onProgress != nil {
 				onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: "failed", Error: res.Error, SentAt: res.SentAt, ETASeconds: eta})
+			}
+			continue
+		}
+		if cleanupErr != nil {
+			res := SendResult{Contact: c, Channel: ch, Status: "failed", Error: channelLabel(ch) + ": send skipped because temporary contacts could not be removed", SentAt: time.Now()}
+			results = append(results, res)
+			if onProgress != nil {
+				onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: res.Status, Error: res.Error, SentAt: res.SentAt, ETASeconds: eta})
 			}
 			continue
 		}
@@ -405,7 +433,12 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 		var errStr string
 		var sentAt time.Time
 		if resolved {
-			sent, errStr, sentAt = s.sendResolvedViaChannel(ctx, br, c.NormalizedPhone, template)
+			if att != nil {
+				media := bi.(BatchMediaResolver)
+				sent, errStr, sentAt = s.sendResolvedMediaViaChannel(ctx, media, c.NormalizedPhone, template, att)
+			} else {
+				sent, errStr, sentAt = s.sendResolvedViaChannel(ctx, br, c.NormalizedPhone, template)
+			}
 		} else {
 			sent, errStr, sentAt = s.sendViaChannel(ctx, m, c.NormalizedPhone, template, att)
 		}
@@ -427,36 +460,68 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 			onProgress(Progress{Index: i + 1, Total: total, Contact: c, Channel: ch, Status: st, Error: res.Error, SentAt: res.SentAt, ETASeconds: eta})
 		}
 	}
-	// Batch delete imported contacts in background
-	go func() {
-		_ = bi.BatchDelete(context.Background(), toDelete)
-	}()
 	return results
 }
 
-// sendBatchBroadcastHybrid handles a multi-messenger broadcast when Telegram
-// supports batch resolution: batch-import all Telegram users once (avoids
-// the contacts.resolvePhone rate limit), then per contact send WhatsApp and
-// Telegram in parallel (Telegram via SendResolved, no resolvePhone) with
-// per-channel pacing, then batch-delete the imported contacts. WhatsApp
-// delivery keeps working even when the Telegram import fails.
-func (s *Service) sendBatchBroadcastHybrid(ctx context.Context, contacts []Contact, template, batchID string, onProgress func(Progress), br BatchResolver) []SendResult {
+// finishBatchDelete removes only contacts newly imported by this batch.
+// Existing address-book entries are not returned by BatchImport and are never
+// deleted. A background-independent context ensures cleanup still runs after
+// user cancellation.
+func finishBatchDelete(bi BatchImporter, toDelete []ImportedContact) error {
+	if len(toDelete) == 0 {
+		return nil
+	}
+	return bi.BatchDelete(context.Background(), toDelete)
+}
+
+func appendError(current, note string) string {
+	if current == "" {
+		return note
+	}
+	return current + "; " + note
+}
+
+func recordBatchCleanupFailure(results *[]SendResult, contacts []Contact, ch Channel, err error) {
+	note := channelLabel(ch) + ": temporary contacts cleanup failed: " + err.Error()
+	if len(*results) == 0 && len(contacts) > 0 {
+		*results = append(*results, SendResult{
+			Contact: contacts[0], Channel: ChannelNone, Status: "failed", Error: note, SentAt: time.Now(),
+		})
+		return
+	}
+	(*results)[0].Error = appendError((*results)[0].Error, note)
+}
+
+// sendBatchBroadcastHybrid handles broadcasts with batch-resolved Telegram:
+// import all Telegram users once, then send WhatsApp and Telegram in parallel
+// with per-channel pacing. Telegram sends text or media through the cached
+// user; temporary imports are synchronously deleted on every return path.
+func (s *Service) sendBatchBroadcastHybrid(ctx context.Context, contacts []Contact, template, batchID string, att *Attachment, onProgress func(Progress), br BatchResolver, media BatchMediaResolver) (results []SendResult) {
 	total := len(contacts)
 	s.resetDead()
 	phones := make([]string, 0, len(contacts))
 	for _, c := range contacts {
 		phones = append(phones, c.NormalizedPhone)
 	}
-	br.BeginBatch()
+	if err := br.BeginBatch(ctx); err != nil {
+		for _, c := range contacts {
+			results = append(results, SendResult{Contact: c, Channel: ChannelNone, Status: "failed", Error: channelLabel(ChannelTelegram) + ": " + err.Error(), SentAt: time.Now(), BatchID: batchID})
+		}
+		return results
+	}
+	defer br.EndBatch()
 	found, toDelete, importErr := br.BatchImport(ctx, phones)
+	results = make([]SendResult, 0, len(contacts))
+	cleanupErr := finishBatchDelete(br, toDelete)
+	if cleanupErr != nil {
+		defer func() { recordBatchCleanupFailure(&results, contacts, ChannelTelegram, cleanupErr) }()
+	}
 	if importErr != nil && common.IsTelegramAuthError(importErr) {
 		s.markDead(ChannelTelegram)
 	}
-	results := make([]SendResult, 0, len(contacts))
 	for i, c := range contacts {
 		select {
 		case <-ctx.Done():
-			_ = br.BatchDelete(context.Background(), toDelete)
 			return results
 		default:
 		}
@@ -470,6 +535,11 @@ func (s *Service) sendBatchBroadcastHybrid(ctx context.Context, contacts []Conta
 		// canonical E.164.
 		var tgSend tgSendFunc
 		switch {
+		case cleanupErr != nil:
+			msg := channelLabel(ChannelTelegram) + ": send skipped because temporary contacts could not be removed"
+			tgSend = func(context.Context, string, string) (bool, string, time.Time) {
+				return false, msg, time.Time{}
+			}
 		case importErr != nil:
 			msg := channelLabel(ChannelTelegram) + ": batch import failed: " + importErr.Error()
 			if s.channelDead(ChannelTelegram) {
@@ -485,10 +555,13 @@ func (s *Service) sendBatchBroadcastHybrid(ctx context.Context, contacts []Conta
 			}
 		default:
 			tgSend = func(ctx context.Context, phone, msg string) (bool, string, time.Time) {
+				if att != nil {
+					return s.sendResolvedMediaViaChannel(ctx, media, phone, msg, att)
+				}
 				return s.sendResolvedViaChannel(ctx, br, phone, msg)
 			}
 		}
-		res := s.sendOneCtxResolved(ctx, c, template, nil, tgSend)
+		res := s.sendOneCtxResolved(ctx, c, template, att, tgSend)
 		res.BatchID = batchID
 		results = append(results, res)
 		if onProgress != nil {
@@ -509,10 +582,6 @@ func (s *Service) sendBatchBroadcastHybrid(ctx context.Context, contacts []Conta
 			})
 		}
 	}
-	// Batch delete imported contacts in background.
-	go func() {
-		_ = br.BatchDelete(context.Background(), toDelete)
-	}()
 	return results
 }
 
@@ -533,18 +602,17 @@ func (s *Service) SendBatchWithProgressAndBatch(ctx context.Context, contacts []
 func (s *Service) SendBatchWithProgressAndBatchWithAttachment(ctx context.Context, contacts []Contact, template, batchID string, att *Attachment, onProgress func(Progress)) []SendResult {
 	// Normalize once: WA/TG workers share att in parallel and must not mutate it.
 	att.Normalize()
-	// Telegram batch path for a broadcast: pre-import all contacts once
-	// (one import per 20 numbers, no per-contact contacts.resolvePhone, which
-	// is what triggered PEER_FLOOD), then merge WA and TG per contact. Runs
-	// for every batch size — one number or a hundred behave the same. Skipped
-	// only when the batch carries a file (media stays per-contact so the
-	// caption stays attached).
-	if att == nil && len(contacts) > 0 {
-		if br, ok := s.telegram.(BatchResolver); ok {
-			res := s.sendBatchBroadcastHybrid(ctx, contacts, template, batchID, onProgress, br)
-			for i := range res {
-				res[i].BatchID = batchID
+	// Telegram batch path for broadcasts: resolve all contacts once per
+	// chunk, then send text or media to cached users. Batch size never selects
+	// a different phone-resolution path.
+	if len(contacts) > 0 {
+		if att == nil {
+			if br, ok := s.telegram.(BatchResolver); ok {
+				res := s.sendBatchBroadcastHybrid(ctx, contacts, template, batchID, nil, onProgress, br, nil)
+				return res
 			}
+		} else if media, ok := s.telegram.(BatchMediaResolver); ok {
+			res := s.sendBatchBroadcastHybrid(ctx, contacts, template, batchID, att, onProgress, media, media)
 			return res
 		}
 	}
@@ -610,96 +678,93 @@ func (s *Service) sendOneCtxResolved(ctx context.Context, c Contact, tmpl string
 	// WhatsApp and Telegram sends run in parallel goroutines ("different
 	// threads"), each with its own pacing, and results are merged.
 	// A Telegram flood pause therefore never blocks WhatsApp delivery.
-	// Per-contact timeout guards against a hung messenger (e.g. SendMessage
-	// without deadline): the batch continues instead of stalling forever.
 	msg := tmpl // abstract message — no name/phone substitution
-	var mu sync.Mutex
 	var sentChannels []string
 	var errs []string
 	var lastSentAt time.Time
-	contactCtx, cancel := context.WithTimeout(ctx, s.contactTimeoutOrDefault())
-	defer cancel()
-	var wg sync.WaitGroup
-	launch := func(m Messenger, run func(ctx context.Context) (bool, string, time.Time)) {
-		wg.Add(1)
+	type channelOutcome struct {
+		channel Channel
+		sent    bool
+		err     string
+		sentAt  time.Time
+	}
+	outcomes := make(chan channelOutcome, 3)
+	launched := 0
+	launch := func(m Messenger, bounded bool, run func(ctx context.Context) (bool, string, time.Time)) {
+		sendCtx := ctx
+		cancel := func() {}
+		if bounded {
+			sendCtx, cancel = context.WithTimeout(ctx, s.contactTimeoutOrDefault())
+		}
+		launched++
 		go func() {
-			defer wg.Done()
-			sent, errStr, sentAt := run(contactCtx)
-			mu.Lock()
-			defer mu.Unlock()
-			if sent {
-				sentChannels = append(sentChannels, string(m.Name()))
-				lastSentAt = sentAt
-			}
-			if errStr != "" {
-				errs = append(errs, errStr)
+			defer cancel()
+			done := make(chan channelOutcome, 1)
+			go func() {
+				sent, errStr, sentAt := run(sendCtx)
+				done <- channelOutcome{channel: m.Name(), sent: sent, err: errStr, sentAt: sentAt}
+			}()
+			select {
+			case outcome := <-done:
+				outcomes <- outcome
+			case <-sendCtx.Done():
+				errStr := "canceled: " + sendCtx.Err().Error()
+				if ctx.Err() == nil {
+					errStr = "timeout: contact send exceeded " + s.contactTimeoutOrDefault().String()
+				}
+				outcomes <- channelOutcome{channel: m.Name(), err: errStr}
 			}
 		}()
 	}
 	if s.whatsapp != nil {
-		launch(s.whatsapp, func(ctx context.Context) (bool, string, time.Time) {
+		launch(s.whatsapp, true, func(ctx context.Context) (bool, string, time.Time) {
 			return s.sendViaChannel(ctx, s.whatsapp, c.NormalizedPhone, msg, att)
 		})
 	}
 	if s.viber != nil {
-		launch(s.viber, func(ctx context.Context) (bool, string, time.Time) {
+		launch(s.viber, true, func(ctx context.Context) (bool, string, time.Time) {
 			return s.sendViaChannel(ctx, s.viber, c.NormalizedPhone, msg, att)
 		})
 	}
 	if s.telegram != nil {
 		if tgSend != nil {
-			launch(s.telegram, func(ctx context.Context) (bool, string, time.Time) {
+			// Telegram flood waits are server-ordered and may exceed the
+			// generic contact timeout. Keep only the caller's cancellation
+			// deadline so FLOOD_WAIT can be honored in full.
+			launch(s.telegram, false, func(ctx context.Context) (bool, string, time.Time) {
 				return tgSend(ctx, c.NormalizedPhone, msg)
 			})
 		} else {
-			launch(s.telegram, func(ctx context.Context) (bool, string, time.Time) {
+			launch(s.telegram, false, func(ctx context.Context) (bool, string, time.Time) {
 				return s.sendViaChannel(ctx, s.telegram, c.NormalizedPhone, msg, att)
 			})
 		}
 	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		wg.Wait()
-	}()
-	select {
-	case <-done:
-	case <-contactCtx.Done():
-		mu.Lock()
-		if ctx.Err() != nil {
-			errs = append(errs, "canceled: "+ctx.Err().Error())
-		} else {
-			errs = append(errs, "timeout: contact send exceeded "+s.contactTimeoutOrDefault().String())
+	for i := 0; i < launched; i++ {
+		outcome := <-outcomes
+		if outcome.sent {
+			sentChannels = append(sentChannels, string(outcome.channel))
+			if outcome.sentAt.After(lastSentAt) {
+				lastSentAt = outcome.sentAt
+			}
 		}
-		mu.Unlock()
-		// Hung goroutines finish in background; batch continues.
-		go wg.Wait()
-	case <-ctx.Done():
-		mu.Lock()
-		errs = append(errs, "canceled: "+ctx.Err().Error())
-		mu.Unlock()
-		go wg.Wait()
+		if outcome.err != "" {
+			errs = append(errs, outcome.err)
+		}
 	}
-	// Snapshot the shared results under the mutex: on the timeout path the
-	// worker goroutines may still be finishing and appending concurrently.
-	mu.Lock()
-	sentSnapshot := append([]string(nil), sentChannels...)
-	errSnapshot := append([]string(nil), errs...)
-	lastSent := lastSentAt
-	mu.Unlock()
-	if len(sentSnapshot) == 0 {
+	if len(sentChannels) == 0 {
 		errStr := "no messenger available"
-		if len(errSnapshot) > 0 {
-			errStr = joinErrors(errSnapshot)
+		if len(errs) > 0 {
+			errStr = joinErrors(errs)
 		}
 		return SendResult{Contact: c, Channel: ChannelNone, Status: "failed", Error: errStr, SentAt: time.Now()}
 	}
-	combined := Channel(joinChannels(sortedCopy(sentSnapshot)))
+	combined := Channel(joinChannels(sortedCopy(sentChannels)))
 	errStr := ""
-	if len(errSnapshot) > 0 {
-		errStr = joinErrors(errSnapshot)
+	if len(errs) > 0 {
+		errStr = joinErrors(errs)
 	}
-	return SendResult{Contact: c, Channel: combined, Status: "sent", Error: errStr, SentAt: lastSent}
+	return SendResult{Contact: c, Channel: combined, Status: "sent", Error: errStr, SentAt: lastSentAt}
 }
 
 // interContactDelay returns the pause between contacts, safe for zero bounds.
@@ -769,16 +834,14 @@ func (s *Service) sendViaChannel(ctx context.Context, m Messenger, phone, msg st
 		return false, channelLabel(m.Name()) + ": " + SessionLostError, time.Time{}
 	}
 	if err := s.paceChannel(ctx, m.Name()); err != nil {
-		return false, "", time.Time{}
+		return false, channelLabel(m.Name()) + ": " + err.Error(), time.Time{}
 	}
 	if att != nil {
 		if ms, ok := m.(MediaSender); ok {
-			if err := s.withFloodRetry(ctx, m.Name(), func() error {
+			sent, errStr, sentAt := s.sendMediaWithFloodRetry(ctx, m.Name(), func() error {
 				return ms.SendMedia(phone, msg, att)
-			}); err != nil {
-				return false, channelLabel(m.Name()) + ": " + sendErrText(m.Name(), err), time.Time{}
-			}
-			return true, "", time.Now()
+			})
+			return sent, errStr, sentAt
 		}
 		// Messenger cannot send files: deliver text so the contact still
 		// gets the message, and note the skipped attachment.
@@ -850,10 +913,10 @@ func (s *Service) sendResolvedViaChannel(ctx context.Context, br BatchResolver, 
 		return false, channelLabel(ChannelTelegram) + ": " + SessionLostError, time.Time{}
 	}
 	if err := s.paceChannel(ctx, ChannelTelegram); err != nil {
-		return false, "", time.Time{}
+		return false, channelLabel(ChannelTelegram) + ": " + err.Error(), time.Time{}
 	}
 	if err := s.withFloodRetry(ctx, ChannelTelegram, func() error {
-		return br.SendResolved(phone, msg)
+		return br.SendResolved(ctx, phone, msg)
 	}); err != nil {
 		if common.IsUserNotFound(err) {
 			// No Telegram account for this number — reported, not silently
@@ -865,11 +928,79 @@ func (s *Service) sendResolvedViaChannel(ctx context.Context, br BatchResolver, 
 	return true, "", time.Now()
 }
 
+func (s *Service) sendResolvedMediaViaChannel(ctx context.Context, media BatchMediaResolver, phone, caption string, att *Attachment) (bool, string, time.Time) {
+	if s.channelDead(ChannelTelegram) {
+		return false, channelLabel(ChannelTelegram) + ": " + SessionLostError, time.Time{}
+	}
+	if err := s.paceChannel(ctx, ChannelTelegram); err != nil {
+		return false, channelLabel(ChannelTelegram) + ": " + err.Error(), time.Time{}
+	}
+	return s.sendMediaWithFloodRetry(ctx, ChannelTelegram, func() error {
+		return media.SendResolvedMedia(ctx, phone, caption, att)
+	})
+}
+
+func (s *Service) sendMediaWithFloodRetry(ctx context.Context, ch Channel, op func() error) (bool, string, time.Time) {
+	err := op()
+	if err == nil {
+		s.noteFlood(ch, false)
+		return true, "", time.Now()
+	}
+	var partial *PartialDeliveryError
+	if errors.As(err, &partial) {
+		if common.IsTelegramAuthError(err) {
+			s.markDead(ch)
+		}
+		if wait, isFlood := common.FloodWaitDuration(err); isFlood {
+			if waitErr := s.sleepAfterPartialFlood(ctx, ch, wait); waitErr != nil {
+				err = errors.Join(err, waitErr)
+			}
+		} else {
+			s.noteFlood(ch, false)
+		}
+		return true, channelLabel(ch) + ": " + err.Error(), time.Now()
+	}
+	if err = s.retryAfterInitialError(ctx, ch, err, op); err != nil {
+		if common.IsUserNotFound(err) {
+			return false, channelLabel(ch) + ": number not found in " + channelLabel(ch), time.Time{}
+		}
+		return false, channelLabel(ch) + ": " + sendErrText(ch, err), time.Time{}
+	}
+	return true, "", time.Now()
+}
+
+// sleepAfterPartialFlood honors the server's wait without retrying the full
+// media operation, which would duplicate a file already delivered before a
+// follow-up text chunk hit FLOOD_WAIT.
+func (s *Service) sleepAfterPartialFlood(ctx context.Context, ch Channel, d time.Duration) error {
+	s.noteFlood(ch, true)
+	wait := d + 2*time.Second + time.Duration(rand.Int63n(int64(3*time.Second)))
+	cooldown := s.floodCooldownNeeded(ch)
+	if cooldown && wait < 5*time.Minute {
+		wait = 5 * time.Minute
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(wait):
+	}
+	if cooldown {
+		s.resetFlood(ch)
+	}
+	return nil
+}
+
 // withFloodRetry runs op, sleeping the full server-ordered flood wait and
 // retrying once. 3 consecutive Telegram floods trigger a 5min cooldown so a
 // flood wave pauses delivery instead of snowballing into a key ban.
 func (s *Service) withFloodRetry(ctx context.Context, ch Channel, op func() error) error {
-	err := op()
+	return s.retryAfterInitialError(ctx, ch, op(), op)
+}
+
+// retryAfterInitialError applies flood/auth classification to an operation
+// that has already been attempted. This avoids issuing a second request
+// before honoring an initial FLOOD_WAIT.
+func (s *Service) retryAfterInitialError(ctx context.Context, ch Channel, err error, op func() error) error {
 	if err == nil {
 		s.noteFlood(ch, false)
 		return nil
@@ -894,16 +1025,40 @@ func (s *Service) withFloodRetry(ctx context.Context, ch Channel, op func() erro
 		s.noteFlood(ch, false)
 		return nil
 	}
-	if _, stillFlood := common.FloodWaitDuration(err); stillFlood {
+	secondWait, stillFlood := common.FloodWaitDuration(err)
+	if stillFlood {
 		s.noteFlood(ch, true)
 		if s.floodCooldownNeeded(ch) {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(5 * time.Minute):
+			cooldownWait := secondWait
+			if cooldownWait < 5*time.Minute {
+				cooldownWait = 5 * time.Minute
+			}
+			if waitErr := s.sleepFlood(ctx, ch, cooldownWait); waitErr != nil {
+				return errors.Join(err, waitErr)
 			}
 			s.resetFlood(ch)
-			return op()
+			err = op()
+			if err == nil {
+				s.noteFlood(ch, false)
+				return nil
+			}
+			if common.IsTelegramAuthError(err) {
+				s.markDead(ch)
+				s.noteFlood(ch, false)
+				return err
+			}
+			if finalWait, isFlood := common.FloodWaitDuration(err); isFlood {
+				s.noteFlood(ch, true)
+				if waitErr := s.sleepFlood(ctx, ch, finalWait); waitErr != nil {
+					return errors.Join(err, waitErr)
+				}
+				return err
+			}
+			s.noteFlood(ch, false)
+			return err
+		}
+		if waitErr := s.sleepFlood(ctx, ch, secondWait); waitErr != nil {
+			return errors.Join(err, waitErr)
 		}
 		return err
 	}
@@ -917,6 +1072,9 @@ func (s *Service) withFloodRetry(ctx context.Context, ch Channel, op func() erro
 // sleepFlood sleeps the full server-ordered wait plus a small jitter.
 // ctx cancellation aborts the wait (batch cancel).
 func (s *Service) sleepFlood(ctx context.Context, ch Channel, d time.Duration) error {
+	if s.sleepFloodFn != nil {
+		return s.sleepFloodFn(ctx, ch, d)
+	}
 	wait := d + 2*time.Second + time.Duration(rand.Int63n(int64(3*time.Second)))
 	select {
 	case <-ctx.Done():

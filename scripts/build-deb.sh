@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build .deb via nfpm (preferred) or dpkg-deb fallback
 set -euo pipefail
-VERSION="${1:-0.1.0}"
+VERSION="${1:-0.4.1}"
 echo "[build-deb] Building visnyk $VERSION"
 # Ensure binary exists
 if [ ! -f "build/bin/visnyk" ]; then

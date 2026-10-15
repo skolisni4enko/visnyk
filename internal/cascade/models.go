@@ -68,6 +68,33 @@ type MediaSender interface {
 	SendMedia(phone, caption string, att *Attachment) error
 }
 
+// PartialDeliveryError reports that the file itself was delivered but a
+// follow-up text chunk failed. Callers must not retry the whole media send.
+type PartialDeliveryError struct {
+	Err error
+}
+
+func (e *PartialDeliveryError) Error() string {
+	if e == nil || e.Err == nil {
+		return "media delivered but follow-up text failed"
+	}
+	return "media delivered but follow-up text failed: " + e.Err.Error()
+}
+
+func (e *PartialDeliveryError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// BatchMediaResolver sends media to a user resolved by a prior batch import.
+// It avoids per-recipient contacts.resolvePhone calls for file broadcasts.
+type BatchMediaResolver interface {
+	BatchResolver
+	SendResolvedMedia(ctx context.Context, phone, caption string, att *Attachment) error
+}
+
 // BatchSender is an optional batch path for Telegram: import all contacts
 // in chunks, send to all resolved users, then delete the temporary
 // contacts in one batch. Avoids per-contact "Test" pollution and
@@ -100,12 +127,14 @@ type BatchImporter interface {
 // per-account budget) that otherwise throttles large broadcasts.
 type BatchResolver interface {
 	BatchImporter
-	// BeginBatch clears the resolve cache before a fresh batch.
-	BeginBatch()
+	// BeginBatch acquires the batch lifecycle and clears the resolve cache.
+	BeginBatch(ctx context.Context) error
+	// EndBatch clears the batch cache and releases its lifecycle lock.
+	EndBatch()
 	// SendResolved sends to a user resolved by a prior BatchImport.
 	// Returns a "user not found" error when the phone was not resolved.
 	// The phone is a canonical E.164 value from Contact.NormalizedPhone.
-	SendResolved(phone, message string) error
+	SendResolved(ctx context.Context, phone, message string) error
 }
 
 // ImportedContact is a minimal handle for batch delete, avoids importing tg.

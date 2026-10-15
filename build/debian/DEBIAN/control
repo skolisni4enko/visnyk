@@ -1,5 +1,5 @@
 Package: visnyk
-Version: 0.4.0
+Version: 0.4.1
 Section: utils
 Priority: optional
 Architecture: amd64
@@ -7,6 +7,8 @@ Maintainer: Visnyk Team <team@visnyk.local>
 Description: broadcast messenger for WA, TG
  Checks number availability and delivers to all available messengers.
  Uses a single personal account per messenger.
+ 0.4.1: Telegram media uses batch-resolved users and temporary imported
+ contacts are deleted before sending.
  0.4.0: Telegram bulk sends batch-import contacts instead of per-number
  resolvePhone, avoiding the resolvePhone rate limit.
  0.3.0: broadcast file attachments with caption, long-text auto-split.
