@@ -1,3 +1,12 @@
+visnyk (0.4.0-1) noble; urgency=low
+
+  * Telegram bulk sends now batch-import contacts (20 per chunk) instead
+    of per-number contacts.resolvePhone, avoiding the resolvePhone rate
+    limit that dropped Telegram delivery by timeout on large batches.
+    Broadcast and direct paths both use the batch-resolved fast path.
+
+ -- Visnyk Team <team@visnyk.local>  Mon, 13 Oct 2026 12:00:00 +0200
+
 visnyk (0.3.0-1) noble; urgency=low
 
   * Broadcast file attachments: 1 file per batch (photo/video/audio up

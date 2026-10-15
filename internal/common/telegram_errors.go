@@ -90,6 +90,21 @@ func IsTelegramNotFound(err error) bool {
 	return strings.Contains(msg, "PHONE_NOT_OCCUPIED")
 }
 
+// IsUserNotFound reports that the phone has no resolvable Telegram user.
+// Matches both PHONE_NOT_OCCUPIED (resolvePhone) and the plain "user not
+// found" sentinel returned by batch-resolved send paths. Callers skip the
+// contact without retrying.
+func IsUserNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if IsTelegramNotFound(err) {
+		return true
+	}
+	msg := strings.ToUpper(err.Error())
+	return strings.Contains(msg, "USER NOT FOUND") || strings.Contains(msg, "USER_NOT_FOUND")
+}
+
 // parseFloodWaitParens parses legacy "FLOOD_WAIT (110)" style messages.
 func parseFloodWaitParens(msg string) (time.Duration, bool) {
 	upper := strings.ToUpper(msg)

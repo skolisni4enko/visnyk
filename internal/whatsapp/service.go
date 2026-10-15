@@ -408,18 +408,20 @@ func (s *Service) sendConvertedText(phone, md string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	_ = ctx
 	msg := &waProto.Message{
 		Conversation: &md,
 	}
-	_, err = s.client.SendMessage(context.Background(), jid, msg)
+	_, err = s.client.SendMessage(ctx, jid, msg)
 	if err != nil {
 		if isNoLIDError(err) {
 			// Cold LID cache (no prior IsOnWhatsApp for this number):
 			// warm it once and retry. A repeated failure means the
 			// server really has no LID — the number is not on WhatsApp.
 			if ok, werr := s.IsOnWhatsApp(phone); werr == nil && ok {
-				if _, rerr := s.client.SendMessage(context.Background(), jid, msg); rerr != nil {
+				retryCtx, retryCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				_, rerr := s.client.SendMessage(retryCtx, jid, msg)
+				retryCancel()
+				if rerr != nil {
 					return fmt.Errorf("send message: %w", rerr)
 				}
 				return nil

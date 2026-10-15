@@ -40,6 +40,10 @@ type Service struct {
 	// dead channel instantly instead of hammering it. Reset per batch.
 	deadMu sync.Mutex
 	dead   map[Channel]bool
+
+	// contactTimeout caps one contact across all channels: a hung
+	// messenger never stalls the whole batch. Zero means default.
+	contactTimeout time.Duration
 }
 
 // New creates a cascade service with WA > TG > Viber priority.
@@ -55,7 +59,19 @@ func New(wa, tg, vb Messenger) *Service {
 		tgMaxDelay: 15 * time.Second,
 		lastSend:   make(map[Channel]time.Time),
 		dead:       make(map[Channel]bool),
+		// 90s covers WA check 10s + send 15s + TG resolve 10s + send 15s
+		// + pacing 15s + margin; a slower contact is a hung contact.
+		contactTimeout: 90 * time.Second,
 	}
+}
+
+// contactTimeoutOrDefault returns the per-contact cap (90s when unset,
+// so Service literals in tests keep working).
+func (s *Service) contactTimeoutOrDefault() time.Duration {
+	if s.contactTimeout > 0 {
+		return s.contactTimeout
+	}
+	return 90 * time.Second
 }
 
 // SessionLostError is reported for contacts skipped after their channel died.
@@ -271,7 +287,7 @@ func (s *Service) sendBatchDirectBatch(ctx context.Context, contacts []Contact, 
 	results := make([]SendResult, 0, len(contacts))
 	for i, c := range contacts {
 		eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
-		perr := perPhoneErr[c.NormalizedPhone]
+		perr := perPhoneErr[common.CleanPhoneE164(c.NormalizedPhone)]
 		var res SendResult
 		if perr != nil {
 			// per-phone error already contains "skipped: " or "failed to send: " prefix from BatchSend
@@ -311,6 +327,12 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 	phones := make([]string, 0, len(contacts))
 	for _, c := range contacts {
 		phones = append(phones, c.NormalizedPhone)
+	}
+	// Resolved fast path: when the importer also supports batch resolution,
+	// import once and send to cached users — no per-contact resolvePhone.
+	br, resolved := bi.(BatchResolver)
+	if resolved {
+		br.BeginBatch()
 	}
 	// Batch import all contacts
 	found, toDelete, err := bi.BatchImport(ctx, phones)
@@ -363,7 +385,7 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 		default:
 		}
 		eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
-		if !found[c.NormalizedPhone] {
+		if !found[common.CleanPhoneE164(c.NormalizedPhone)] {
 			res := SendResult{Contact: c, Channel: ch, Status: "failed", Error: "user not found for " + c.NormalizedPhone, SentAt: time.Now()}
 			results = append(results, res)
 			if onProgress != nil {
@@ -379,7 +401,14 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 			}
 			continue
 		}
-		sent, errStr, sentAt := s.sendViaChannel(ctx, m, c.NormalizedPhone, template, att)
+		var sent bool
+		var errStr string
+		var sentAt time.Time
+		if resolved {
+			sent, errStr, sentAt = s.sendResolvedViaChannel(ctx, br, c.NormalizedPhone, template)
+		} else {
+			sent, errStr, sentAt = s.sendViaChannel(ctx, m, c.NormalizedPhone, template, att)
+		}
 		var res SendResult
 		if !sent {
 			if errStr == "" {
@@ -405,6 +434,88 @@ func (s *Service) sendBatchDirectBatchHybrid(ctx context.Context, contacts []Con
 	return results
 }
 
+// sendBatchBroadcastHybrid handles a multi-messenger broadcast when Telegram
+// supports batch resolution: batch-import all Telegram users once (avoids
+// the contacts.resolvePhone rate limit), then per contact send WhatsApp and
+// Telegram in parallel (Telegram via SendResolved, no resolvePhone) with
+// per-channel pacing, then batch-delete the imported contacts. WhatsApp
+// delivery keeps working even when the Telegram import fails.
+func (s *Service) sendBatchBroadcastHybrid(ctx context.Context, contacts []Contact, template, batchID string, onProgress func(Progress), br BatchResolver) []SendResult {
+	total := len(contacts)
+	s.resetDead()
+	phones := make([]string, 0, len(contacts))
+	for _, c := range contacts {
+		phones = append(phones, c.NormalizedPhone)
+	}
+	br.BeginBatch()
+	found, toDelete, importErr := br.BatchImport(ctx, phones)
+	if importErr != nil && common.IsTelegramAuthError(importErr) {
+		s.markDead(ChannelTelegram)
+	}
+	results := make([]SendResult, 0, len(contacts))
+	for i, c := range contacts {
+		select {
+		case <-ctx.Done():
+			_ = br.BatchDelete(context.Background(), toDelete)
+			return results
+		default:
+		}
+		eta := int(time.Duration(total-i-1) * 8 * time.Second / time.Second)
+		if onProgress != nil {
+			onProgress(Progress{Index: i + 1, Total: total, Contact: c, Status: "checking", ETASeconds: eta, BatchID: batchID})
+		}
+		// Telegram send path: resolved fast path when found, an explicit
+		// "not on Telegram" note when the number has no Telegram account, or
+		// an explicit error when the import failed. BatchResolver keys are
+		// canonical E.164.
+		var tgSend tgSendFunc
+		switch {
+		case importErr != nil:
+			msg := channelLabel(ChannelTelegram) + ": batch import failed: " + importErr.Error()
+			if s.channelDead(ChannelTelegram) {
+				msg = channelLabel(ChannelTelegram) + ": " + SessionLostError
+			}
+			tgSend = func(context.Context, string, string) (bool, string, time.Time) {
+				return false, msg, time.Time{}
+			}
+		case !found[common.CleanPhoneE164(c.NormalizedPhone)]:
+			msg := channelLabel(ChannelTelegram) + ": number not found in Telegram"
+			tgSend = func(context.Context, string, string) (bool, string, time.Time) {
+				return false, msg, time.Time{}
+			}
+		default:
+			tgSend = func(ctx context.Context, phone, msg string) (bool, string, time.Time) {
+				return s.sendResolvedViaChannel(ctx, br, phone, msg)
+			}
+		}
+		res := s.sendOneCtxResolved(ctx, c, template, nil, tgSend)
+		res.BatchID = batchID
+		results = append(results, res)
+		if onProgress != nil {
+			st := res.Status
+			if st == "" {
+				st = "failed"
+			}
+			onProgress(Progress{
+				Index:      i + 1,
+				Total:      total,
+				Contact:    c,
+				Channel:    res.Channel,
+				Status:     st,
+				Error:      res.Error,
+				SentAt:     res.SentAt,
+				ETASeconds: eta,
+				BatchID:    batchID,
+			})
+		}
+	}
+	// Batch delete imported contacts in background.
+	go func() {
+		_ = br.BatchDelete(context.Background(), toDelete)
+	}()
+	return results
+}
+
 // SendBatchWithProgress is like SendBatch but calls onProgress after each contact and before delay.
 // onProgress may be nil. It is called synchronously on the sender goroutine.
 // No inter-contact sleep here: pacing is enforced per-channel by paceChannel
@@ -422,6 +533,21 @@ func (s *Service) SendBatchWithProgressAndBatch(ctx context.Context, contacts []
 func (s *Service) SendBatchWithProgressAndBatchWithAttachment(ctx context.Context, contacts []Contact, template, batchID string, att *Attachment, onProgress func(Progress)) []SendResult {
 	// Normalize once: WA/TG workers share att in parallel and must not mutate it.
 	att.Normalize()
+	// Telegram batch path for a broadcast: pre-import all contacts once
+	// (one import per 20 numbers, no per-contact contacts.resolvePhone, which
+	// is what triggered PEER_FLOOD), then merge WA and TG per contact. Runs
+	// for every batch size — one number or a hundred behave the same. Skipped
+	// only when the batch carries a file (media stays per-contact so the
+	// caption stays attached).
+	if att == nil && len(contacts) > 0 {
+		if br, ok := s.telegram.(BatchResolver); ok {
+			res := s.sendBatchBroadcastHybrid(ctx, contacts, template, batchID, onProgress, br)
+			for i := range res {
+				res[i].BatchID = batchID
+			}
+			return res
+		}
+	}
 	results := make([]SendResult, 0, len(contacts))
 	total := len(contacts)
 	s.resetDead()
@@ -470,26 +596,35 @@ func (s *Service) sendOne(ctx context.Context, c Contact, tmpl string) SendResul
 	return s.sendOneCtx(ctx, c, tmpl, nil)
 }
 
+// tgSendFunc sends one Telegram message for a contact, returning
+// (sent, errorLabel, sentAt). The batch-resolved broadcast overrides it to
+// send to already-imported users instead of calling contacts.resolvePhone.
+type tgSendFunc func(ctx context.Context, phone, msg string) (bool, string, time.Time)
+
 func (s *Service) sendOneCtx(ctx context.Context, c Contact, tmpl string, att *Attachment) SendResult {
+	return s.sendOneCtxResolved(ctx, c, tmpl, att, nil)
+}
+
+func (s *Service) sendOneCtxResolved(ctx context.Context, c Contact, tmpl string, att *Attachment, tgSend tgSendFunc) SendResult {
 	// Broadcast to all available messengers on independent schedules:
 	// WhatsApp and Telegram sends run in parallel goroutines ("different
 	// threads"), each with its own pacing, and results are merged.
 	// A Telegram flood pause therefore never blocks WhatsApp delivery.
+	// Per-contact timeout guards against a hung messenger (e.g. SendMessage
+	// without deadline): the batch continues instead of stalling forever.
 	msg := tmpl // abstract message — no name/phone substitution
-	channels := []Messenger{s.whatsapp, s.telegram, s.viber}
 	var mu sync.Mutex
 	var sentChannels []string
 	var errs []string
 	var lastSentAt time.Time
+	contactCtx, cancel := context.WithTimeout(ctx, s.contactTimeoutOrDefault())
+	defer cancel()
 	var wg sync.WaitGroup
-	for _, m := range channels {
-		if m == nil {
-			continue
-		}
+	launch := func(m Messenger, run func(ctx context.Context) (bool, string, time.Time)) {
 		wg.Add(1)
-		go func(m Messenger) {
+		go func() {
 			defer wg.Done()
-			sent, errStr, sentAt := s.sendViaChannel(ctx, m, c.NormalizedPhone, msg, att)
+			sent, errStr, sentAt := run(contactCtx)
 			mu.Lock()
 			defer mu.Unlock()
 			if sent {
@@ -499,22 +634,72 @@ func (s *Service) sendOneCtx(ctx context.Context, c Contact, tmpl string, att *A
 			if errStr != "" {
 				errs = append(errs, errStr)
 			}
-		}(m)
+		}()
 	}
-	wg.Wait()
-	if len(sentChannels) == 0 {
+	if s.whatsapp != nil {
+		launch(s.whatsapp, func(ctx context.Context) (bool, string, time.Time) {
+			return s.sendViaChannel(ctx, s.whatsapp, c.NormalizedPhone, msg, att)
+		})
+	}
+	if s.viber != nil {
+		launch(s.viber, func(ctx context.Context) (bool, string, time.Time) {
+			return s.sendViaChannel(ctx, s.viber, c.NormalizedPhone, msg, att)
+		})
+	}
+	if s.telegram != nil {
+		if tgSend != nil {
+			launch(s.telegram, func(ctx context.Context) (bool, string, time.Time) {
+				return tgSend(ctx, c.NormalizedPhone, msg)
+			})
+		} else {
+			launch(s.telegram, func(ctx context.Context) (bool, string, time.Time) {
+				return s.sendViaChannel(ctx, s.telegram, c.NormalizedPhone, msg, att)
+			})
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wg.Wait()
+	}()
+	select {
+	case <-done:
+	case <-contactCtx.Done():
+		mu.Lock()
+		if ctx.Err() != nil {
+			errs = append(errs, "canceled: "+ctx.Err().Error())
+		} else {
+			errs = append(errs, "timeout: contact send exceeded "+s.contactTimeoutOrDefault().String())
+		}
+		mu.Unlock()
+		// Hung goroutines finish in background; batch continues.
+		go wg.Wait()
+	case <-ctx.Done():
+		mu.Lock()
+		errs = append(errs, "canceled: "+ctx.Err().Error())
+		mu.Unlock()
+		go wg.Wait()
+	}
+	// Snapshot the shared results under the mutex: on the timeout path the
+	// worker goroutines may still be finishing and appending concurrently.
+	mu.Lock()
+	sentSnapshot := append([]string(nil), sentChannels...)
+	errSnapshot := append([]string(nil), errs...)
+	lastSent := lastSentAt
+	mu.Unlock()
+	if len(sentSnapshot) == 0 {
 		errStr := "no messenger available"
-		if len(errs) > 0 {
-			errStr = joinErrors(errs)
+		if len(errSnapshot) > 0 {
+			errStr = joinErrors(errSnapshot)
 		}
 		return SendResult{Contact: c, Channel: ChannelNone, Status: "failed", Error: errStr, SentAt: time.Now()}
 	}
-	combined := Channel(joinChannels(sortedCopy(sentChannels)))
+	combined := Channel(joinChannels(sortedCopy(sentSnapshot)))
 	errStr := ""
-	if len(errs) > 0 {
-		errStr = joinErrors(errs)
+	if len(errSnapshot) > 0 {
+		errStr = joinErrors(errSnapshot)
 	}
-	return SendResult{Contact: c, Channel: combined, Status: "sent", Error: errStr, SentAt: lastSentAt}
+	return SendResult{Contact: c, Channel: combined, Status: "sent", Error: errStr, SentAt: lastSent}
 }
 
 // interContactDelay returns the pause between contacts, safe for zero bounds.
@@ -640,8 +825,10 @@ func (s *Service) sendViaChannel(ctx context.Context, m Messenger, phone, msg st
 		}
 	}
 	if !ok {
-		// not available — not an error for broadcast, just skip
-		return false, "", time.Time{}
+		// Not available: not an error for a broadcast, but report why the
+		// channel was skipped so the user sees it in history instead of a
+		// silent drop.
+		return false, channelLabel(m.Name()) + ": number not found in " + channelLabel(m.Name()), time.Time{}
 	}
 	if err := s.withFloodRetry(ctx, m.Name(), func() error {
 		return m.Send(phone, msg)
@@ -651,6 +838,29 @@ func (s *Service) sendViaChannel(ctx context.Context, m Messenger, phone, msg st
 	if att != nil {
 		// Messenger cannot send files: text was delivered, flag the drop.
 		return true, channelLabel(m.Name()) + ": attachment skipped (files not supported here), text sent", time.Now()
+	}
+	return true, "", time.Now()
+}
+
+// sendResolvedViaChannel delivers via the batch-resolved Telegram path:
+// pace, then SendResolved (no resolvePhone/import), with flood retry. The
+// user must have been resolved by a prior BatchImport.
+func (s *Service) sendResolvedViaChannel(ctx context.Context, br BatchResolver, phone, msg string) (bool, string, time.Time) {
+	if s.channelDead(ChannelTelegram) {
+		return false, channelLabel(ChannelTelegram) + ": " + SessionLostError, time.Time{}
+	}
+	if err := s.paceChannel(ctx, ChannelTelegram); err != nil {
+		return false, "", time.Time{}
+	}
+	if err := s.withFloodRetry(ctx, ChannelTelegram, func() error {
+		return br.SendResolved(phone, msg)
+	}); err != nil {
+		if common.IsUserNotFound(err) {
+			// No Telegram account for this number — reported, not silently
+			// dropped, so history shows why the channel was skipped.
+			return false, channelLabel(ChannelTelegram) + ": number not found in Telegram", time.Time{}
+		}
+		return false, channelLabel(ChannelTelegram) + ": " + sendErrText(ChannelTelegram, err), time.Time{}
 	}
 	return true, "", time.Now()
 }

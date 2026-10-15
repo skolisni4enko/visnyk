@@ -75,7 +75,9 @@ type MediaSender interface {
 type BatchSender interface {
 	Messenger
 	// BatchSend imports phones in chunks, sends message to each found user,
-	// and deletes the temporary contacts. Returns per-phone error (nil = sent).
+	// and deletes the temporary contacts. Returns per-phone error (nil = sent)
+	// keyed by canonical E.164 (common.CleanPhoneE164), matching
+	// Contact.NormalizedPhone.
 	BatchSend(ctx context.Context, phones []string, message string) (map[string]error, error)
 }
 
@@ -85,8 +87,25 @@ type BatchSender interface {
 // capped at 30s) so PEER_FLOOD is avoided.
 type BatchImporter interface {
 	Messenger
+	// BatchImport returns found phones keyed by canonical E.164
+	// (common.CleanPhoneE164), matching Contact.NormalizedPhone.
 	BatchImport(ctx context.Context, phones []string) (map[string]bool, []ImportedContact, error)
 	BatchDelete(ctx context.Context, toDelete []ImportedContact) error
+}
+
+// BatchResolver is the batch fast path for bulk sends: pre-import all
+// contacts once via BatchImport, then send to the cached users via
+// SendResolved — no per-contact contacts.resolvePhone/ImportContacts.
+// This avoids the contacts.resolvePhone rate limit (1 call / 3s, plus a
+// per-account budget) that otherwise throttles large broadcasts.
+type BatchResolver interface {
+	BatchImporter
+	// BeginBatch clears the resolve cache before a fresh batch.
+	BeginBatch()
+	// SendResolved sends to a user resolved by a prior BatchImport.
+	// Returns a "user not found" error when the phone was not resolved.
+	// The phone is a canonical E.164 value from Contact.NormalizedPhone.
+	SendResolved(phone, message string) error
 }
 
 // ImportedContact is a minimal handle for batch delete, avoids importing tg.

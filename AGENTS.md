@@ -111,7 +111,7 @@ All numbers normalized in `internal/normalizer` to E.164 (`+380XXXXXXXXX`) via `
 
 Every contact is delivered to **all messengers where the number exists**, in parallel goroutines per channel. `SendResult.Channel` is a comma list (`whatsapp,telegram`), `Status=sent` if at least one succeeded.
 
-- Telegram resolve-first: `contacts.resolvePhone` (no address-book pollution, 3s throttle), single `ImportContacts` fallback only for privacy-hidden numbers, cleanup delete only on the fallback path.
+- Telegram batch-resolve: no per-contact `contacts.resolvePhone` (that caused `PEER_FLOOD`). Every broadcast, regardless of size, imports the numbers once per chunk (20 per chunk, 5s pacing) via `BatchImport`, sends to the resolved users via `SendResolved`, then batch-deletes the temporary contacts. `BatchImport`/`SendResolved` key phones by canonical E.164 (`common.CleanPhoneE164`); `ClientID` in `InputPhoneContact` is the index inside the chunk and is the only reliable phone link for privacy-hidden users. A number with no Telegram account is reported as `Telegram: number not found in Telegram`, never silently dropped.
 - Per-channel pacing: WA 8-15s + jitter, TG 8-15s capped at 30s (`TelegramPaceMax`). A TG flood pause never blocks WA.
 - Flood: server-ordered `FLOOD_WAIT` is honored in full + retry once; 3 consecutive TG floods → 5min cooldown. Skippable errors (`PRIVACY_PREMIUM_REQUIRED`, blocks) are not retried.
 - Circuit breaker: first fatal auth error (401) marks the channel dead for the rest of the batch — remaining contacts skip it instantly with "сесія втрачена, перелогінься", other channels continue.
@@ -156,7 +156,7 @@ When user says "run QA" — run `webapp-testing` skill: open UI via Playwright, 
 
 ## Current product status
 
-v0.3.0. Broadcast WA+TG (parallel, resolve-first TG, flood protection, circuit breaker), file attachments (1 file per batch, template as caption, long-text auto-split, 16MB media / 100MB docs), direct WA/TG send, background health monitor, bulk import (paste/file/XLSX) with one-column tidy, history + logs + deb/Windows/macOS-source packaging. Viber — stub. MVP for 70-100 +380 numbers.
+v0.4.0. Broadcast WA+TG (parallel, batch-import TG — 20/chunk, no per-number resolvePhone rate limit; flood protection, circuit breaker), file attachments (1 file per batch, template as caption, long-text auto-split, 16MB media / 100MB docs), direct WA/TG send, background health monitor, bulk import (paste/file/XLSX) with one-column tidy, history + logs + deb/Windows/macOS-source packaging. Viber — stub. MVP for 70-100 +380 numbers.
 
 ## Git & branch conventions
 

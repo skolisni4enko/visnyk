@@ -3,11 +3,14 @@ package cascade
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/tgerr"
+
+	"visnyk/internal/common"
 )
 
 func newFloodError() error { return tgerr.New(420, "FLOOD_WAIT_0") }
@@ -392,5 +395,331 @@ func TestDirectDeadChannelAbortsFast(t *testing.T) {
 	}
 	if elapsed > 5*time.Second {
 		t.Errorf("dead channel must abort fast without pacing sleeps, took %v", elapsed)
+	}
+}
+
+type hungMessenger struct {
+	name      Channel
+	available map[string]bool
+	release   chan struct{}
+}
+
+func (m *hungMessenger) Name() Channel { return m.name }
+func (m *hungMessenger) IsAvailable(phone string) (bool, error) {
+	return m.available[phone], nil
+}
+func (m *hungMessenger) Send(phone, _ string) error {
+	// Simulates whatsmeow SendMessage without deadline: blocks until
+	// the test releases it, long after the cascade must have moved on.
+	<-m.release
+	return nil
+}
+
+func TestHungChannelDoesNotBlockBatch(t *testing.T) {
+	wa := &hungMessenger{name: ChannelWhatsApp, available: map[string]bool{"+380991234567": true}, release: make(chan struct{})}
+	tg := &mockMessenger{name: ChannelTelegram, available: map[string]bool{"+380991234567": true}}
+	svc := New(wa, tg, nil)
+	svc.minDelay = 0
+	svc.maxDelay = 0
+	svc.tgMinDelay = 0
+	svc.tgMaxDelay = 0
+	svc.contactTimeout = 200 * time.Millisecond
+
+	start := time.Now()
+	results := svc.SendBatch(context.Background(), []Contact{{NormalizedPhone: "+380991234567"}}, "Hi")
+	elapsed := time.Since(start)
+	close(wa.release) // let the hung goroutine finish in background
+
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Status != "sent" {
+		t.Errorf("want sent via telegram despite hung whatsapp, got %+v", results[0])
+	}
+	if results[0].Channel != ChannelTelegram {
+		t.Errorf("want telegram-only channel, got %s", results[0].Channel)
+	}
+	if !contains(results[0].Error, "timeout") {
+		t.Errorf("want timeout note in error, got %q", results[0].Error)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("hung channel must not block batch, took %v", elapsed)
+	}
+}
+
+// batchResolverMock implements Messenger + BatchResolver + DirectSender to
+// verify the batch broadcast path: BatchImport once, SendResolved per found
+// contact, and zero ResolveAndSend (resolvePhone) calls.
+type batchResolverMock struct {
+	mu              sync.Mutex
+	name            Channel
+	found           map[string]bool
+	importCalls     int
+	beginBatchCalls int
+	resolveCalls    int
+	sent            []string
+}
+
+func (m *batchResolverMock) Name() Channel { return m.name }
+func (m *batchResolverMock) IsAvailable(phone string) (bool, error) {
+	return false, nil
+}
+func (m *batchResolverMock) Send(phone, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sent = append(m.sent, phone)
+	return nil
+}
+func (m *batchResolverMock) ResolveAndSend(phone, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resolveCalls++
+	m.sent = append(m.sent, phone)
+	return nil
+}
+func (m *batchResolverMock) BeginBatch() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.beginBatchCalls++
+}
+func (m *batchResolverMock) BatchImport(_ context.Context, phones []string) (map[string]bool, []ImportedContact, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.importCalls++
+	found := make(map[string]bool, len(phones))
+	for _, p := range phones {
+		// Mirror the real Telegram service: the found map is keyed by
+		// canonical E.164, whatever form the caller passed in.
+		key := common.CleanPhoneE164(p)
+		if m.found[key] {
+			found[key] = true
+		}
+	}
+	return found, nil, nil
+}
+func (m *batchResolverMock) BatchDelete(_ context.Context, _ []ImportedContact) error { return nil }
+func (m *batchResolverMock) SendResolved(phone, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := common.CleanPhoneE164(phone)
+	if !m.found[key] {
+		return errors.New("user not found for " + key)
+	}
+	m.sent = append(m.sent, key)
+	return nil
+}
+
+// TestBroadcastBatchLookupUsesCanonicalKey feeds cascade a raw-ish
+// NormalizedPhone (mixed spacing) and a mock whose found map is keyed by
+// canonical E.164, as the real Telegram service does. If cascade did not
+// canonicalize before the lookup, Telegram would be silently skipped.
+func TestBroadcastBatchLookupUsesCanonicalKey(t *testing.T) {
+	const raw = "380 99 123-45-67"
+	const canonical = "+380991234567"
+	wa := &mockMessenger{name: ChannelWhatsApp, available: map[string]bool{canonical: true}}
+	tg := &batchResolverMock{name: ChannelTelegram, found: map[string]bool{canonical: true}}
+	svc := New(wa, tg, nil)
+	svc.minDelay, svc.maxDelay = 0, 0
+	svc.tgMinDelay, svc.tgMaxDelay = 0, 0
+
+	results := svc.SendBatch(context.Background(), []Contact{{NormalizedPhone: raw}}, "Hi")
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	res := results[0]
+	if res.Status != "sent" {
+		t.Fatalf("want sent, got %+v", res)
+	}
+	if !contains(string(res.Channel), "telegram") {
+		t.Errorf("want telegram delivered despite non-canonical input, got %s (err=%q)", res.Channel, res.Error)
+	}
+}
+
+func TestBroadcastBatchResolverNoResolvePhone(t *testing.T) {
+	phones := []string{
+		"+380991234500", "+380991234501", "+380991234502", "+380991234503", "+380991234504",
+		"+380991234505", "+380991234506", "+380991234507", "+380991234508", "+380991234509",
+	}
+	waAvailable := make(map[string]bool, len(phones))
+	tgFound := make(map[string]bool, len(phones))
+	contacts := make([]Contact, 0, len(phones))
+	for _, p := range phones {
+		waAvailable[p] = true
+		tgFound[p] = true
+		contacts = append(contacts, Contact{NormalizedPhone: p})
+	}
+	wa := &mockMessenger{name: ChannelWhatsApp, available: waAvailable}
+	tg := &batchResolverMock{name: ChannelTelegram, found: tgFound}
+	svc := New(wa, tg, nil)
+	svc.minDelay = 0
+	svc.maxDelay = 0
+	svc.tgMinDelay = 0
+	svc.tgMaxDelay = 0
+
+	results := svc.SendBatch(context.Background(), contacts, "Hi")
+	if len(results) != 10 {
+		t.Fatalf("want 10 results, got %d", len(results))
+	}
+	for _, r := range results {
+		if r.Status != "sent" {
+			t.Errorf("want sent, got %+v", r)
+		}
+		if !contains(string(r.Channel), "whatsapp") || !contains(string(r.Channel), "telegram") {
+			t.Errorf("want whatsapp+telegram, got %s", r.Channel)
+		}
+	}
+	if tg.importCalls != 1 {
+		t.Errorf("want 1 BatchImport call, got %d", tg.importCalls)
+	}
+	if tg.beginBatchCalls != 1 {
+		t.Errorf("want 1 BeginBatch call, got %d", tg.beginBatchCalls)
+	}
+	if tg.resolveCalls != 0 {
+		t.Errorf("batch path must not call ResolveAndSend (resolvePhone), got %d", tg.resolveCalls)
+	}
+	if len(tg.sent) != 10 {
+		t.Errorf("want 10 SendResolved sends, got %d", len(tg.sent))
+	}
+}
+
+func TestBroadcastBatchResolverNotFoundSkipsTelegram(t *testing.T) {
+	phones := []string{
+		"+380991234500", "+380991234501", "+380991234502", "+380991234503", "+380991234504",
+		"+380991234505", "+380991234506", "+380991234507", "+380991234508", "+380991234509",
+	}
+	waAvailable := make(map[string]bool, len(phones))
+	tgFound := map[string]bool{phones[0]: true} // only the first is on Telegram
+	contacts := make([]Contact, 0, len(phones))
+	for _, p := range phones {
+		waAvailable[p] = true
+		contacts = append(contacts, Contact{NormalizedPhone: p})
+	}
+	wa := &mockMessenger{name: ChannelWhatsApp, available: waAvailable}
+	tg := &batchResolverMock{name: ChannelTelegram, found: tgFound}
+	svc := New(wa, tg, nil)
+	svc.minDelay = 0
+	svc.maxDelay = 0
+	svc.tgMinDelay = 0
+	svc.tgMaxDelay = 0
+
+	results := svc.SendBatch(context.Background(), contacts, "Hi")
+	if len(results) != 10 {
+		t.Fatalf("want 10 results, got %d", len(results))
+	}
+	// First contact delivered to both; the rest are WhatsApp-only.
+	if !contains(string(results[0].Channel), "whatsapp") || !contains(string(results[0].Channel), "telegram") {
+		t.Errorf("want whatsapp+telegram for found contact, got %s", results[0].Channel)
+	}
+	for i := 1; i < 10; i++ {
+		if results[i].Channel != ChannelWhatsApp {
+			t.Errorf("want whatsapp-only for not-found contact %d, got %s", i, results[i].Channel)
+		}
+		if results[i].Status != "sent" {
+			t.Errorf("want sent (whatsapp) for contact %d, got %+v", i, results[i])
+		}
+		// The skipped Telegram channel must be visible, not a silent drop.
+		if !strings.Contains(results[i].Error, "not found in Telegram") {
+			t.Errorf("want Telegram-not-found note for contact %d, got %q", i, results[i].Error)
+		}
+	}
+	if tg.resolveCalls != 0 {
+		t.Errorf("batch path must not call ResolveAndSend, got %d", tg.resolveCalls)
+	}
+	if len(tg.sent) != 1 {
+		t.Errorf("want 1 SendResolved send (only found), got %d", len(tg.sent))
+	}
+}
+
+// TestBroadcastBatchPathUsedForSingleContact pins the contract that a
+// broadcast to one number behaves exactly like a broadcast to many: the
+// batch-resolve path runs (one BatchImport, no per-contact resolvePhone) and
+// the message goes to both WhatsApp and Telegram. Batch size must not decide
+// which channels are attempted.
+func TestBroadcastBatchPathUsedForSingleContact(t *testing.T) {
+	const phone = "+380991234567"
+	wa := &mockMessenger{name: ChannelWhatsApp, available: map[string]bool{phone: true}}
+	tg := &batchResolverMock{name: ChannelTelegram, found: map[string]bool{phone: true}}
+	svc := New(wa, tg, nil)
+	svc.minDelay, svc.maxDelay = 0, 0
+	svc.tgMinDelay, svc.tgMaxDelay = 0, 0
+
+	results := svc.SendBatch(context.Background(), []Contact{{Name: "Ivan", NormalizedPhone: phone}}, "Hi")
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	res := results[0]
+	if res.Status != "sent" {
+		t.Fatalf("want sent, got %+v", res)
+	}
+	if !contains(string(res.Channel), "whatsapp") || !contains(string(res.Channel), "telegram") {
+		t.Errorf("want whatsapp+telegram, got %s", res.Channel)
+	}
+	if tg.importCalls != 1 || tg.beginBatchCalls != 1 {
+		t.Errorf("want batch path (1 import, 1 begin), got import=%d begin=%d", tg.importCalls, tg.beginBatchCalls)
+	}
+	if tg.resolveCalls != 0 {
+		t.Errorf("batch path must not call ResolveAndSend, got %d", tg.resolveCalls)
+	}
+}
+
+// TestBroadcastThreeContactsBothChannels covers the small-batch case that
+// used to take a different code path.
+func TestBroadcastThreeContactsBothChannels(t *testing.T) {
+	phones := []string{"+380991234500", "+380991234501", "+380991234502"}
+	waAvailable := make(map[string]bool, len(phones))
+	tgFound := make(map[string]bool, len(phones))
+	contacts := make([]Contact, 0, len(phones))
+	for _, p := range phones {
+		waAvailable[p] = true
+		tgFound[p] = true
+		contacts = append(contacts, Contact{NormalizedPhone: p})
+	}
+	wa := &mockMessenger{name: ChannelWhatsApp, available: waAvailable}
+	tg := &batchResolverMock{name: ChannelTelegram, found: tgFound}
+	svc := New(wa, tg, nil)
+	svc.minDelay, svc.maxDelay = 0, 0
+	svc.tgMinDelay, svc.tgMaxDelay = 0, 0
+
+	results := svc.SendBatch(context.Background(), contacts, "Hi")
+	if len(results) != 3 {
+		t.Fatalf("want 3 results, got %d", len(results))
+	}
+	for i, r := range results {
+		if r.Status != "sent" {
+			t.Errorf("contact %d: want sent, got %+v", i, r)
+		}
+		if !contains(string(r.Channel), "whatsapp") || !contains(string(r.Channel), "telegram") {
+			t.Errorf("contact %d: want whatsapp+telegram, got %s", i, r.Channel)
+		}
+	}
+	if tg.importCalls != 1 {
+		t.Errorf("want a single BatchImport call, got %d", tg.importCalls)
+	}
+}
+
+// TestBroadcastWhatsAppNotFoundIsReported checks the reciprocal case: the
+// number exists only on Telegram, and the skipped WhatsApp channel is named in
+// the result instead of being dropped silently.
+func TestBroadcastWhatsAppNotFoundIsReported(t *testing.T) {
+	const phone = "+380991234567"
+	wa := &mockMessenger{name: ChannelWhatsApp, available: map[string]bool{}}
+	tg := &batchResolverMock{name: ChannelTelegram, found: map[string]bool{phone: true}}
+	svc := New(wa, tg, nil)
+	svc.minDelay, svc.maxDelay = 0, 0
+	svc.tgMinDelay, svc.tgMaxDelay = 0, 0
+
+	results := svc.SendBatch(context.Background(), []Contact{{NormalizedPhone: phone}}, "Hi")
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	res := results[0]
+	if res.Status != "sent" {
+		t.Fatalf("want sent via Telegram, got %+v", res)
+	}
+	if res.Channel != ChannelTelegram {
+		t.Errorf("want telegram only, got %s", res.Channel)
+	}
+	if !strings.Contains(res.Error, "not found in WhatsApp") {
+		t.Errorf("want WhatsApp-not-found note, got %q", res.Error)
 	}
 }

@@ -56,6 +56,12 @@ type Service struct {
 	// 1 contacts.resolvePhone call per 3 seconds (client-side).
 	resolveMu   sync.Mutex
 	lastResolve time.Time
+
+	// Batch resolve cache: phone -> resolved user, populated by
+	// BatchImport and consumed by SendResolved so bulk sends never hit the
+	// contacts.resolvePhone rate limit. Guarded by batchMu.
+	batchMu    sync.Mutex
+	batchUsers map[string]*tg.User
 }
 
 func resolveSessionPath() string {
@@ -1181,8 +1187,9 @@ func (s *Service) BatchSend(ctx context.Context, phones []string, msgText string
 		default:
 		}
 		usr, ok := phoneToUser[ph]
+		key := batchKey(ph)
 		if !ok || usr == nil {
-			results[ph] = fmt.Errorf("user not found for %s", ph)
+			results[key] = fmt.Errorf("user not found for %s", ph)
 			continue
 		}
 		peer := &tg.InputPeerUser{UserID: usr.ID, AccessHash: usr.AccessHash}
@@ -1195,7 +1202,7 @@ func (s *Service) BatchSend(ctx context.Context, phones []string, msgText string
 				fmt.Printf("[telegram] BatchSend flood wait %v for %s\n", wait, ph)
 				select {
 				case <-ctx.Done():
-					results[ph] = ctx.Err()
+					results[key] = ctx.Err()
 					continue
 				case <-time.After(wait):
 				}
@@ -1205,14 +1212,14 @@ func (s *Service) BatchSend(ctx context.Context, phones []string, msgText string
 			}
 			if err != nil {
 				if common.IsTelegramSkippable(err) {
-					results[ph] = fmt.Errorf("skipped: %w", err)
+					results[key] = fmt.Errorf("skipped: %w", err)
 				} else {
-					results[ph] = fmt.Errorf("failed to send: %w", err)
+					results[key] = fmt.Errorf("failed to send: %w", err)
 				}
 				continue
 			}
 		}
-		results[ph] = nil
+		results[key] = nil
 		// per-message pacing for batch sends (8-15s, capped at 30s)
 		select {
 		case <-ctx.Done():
@@ -1255,9 +1262,144 @@ func (s *Service) BatchSend(ctx context.Context, phones []string, msgText string
 	return results, nil
 }
 
+// BeginBatch clears the batch resolve cache. Call once before a batch
+// import so stale users from a previous batch are never reused.
+func (s *Service) BeginBatch() {
+	s.batchMu.Lock()
+	s.batchUsers = make(map[string]*tg.User)
+	s.batchMu.Unlock()
+}
+
+// batchKey canonicalizes a phone for the batch resolve cache and for the
+// found map returned by BatchImport. cascade looks both up with E.164 values
+// from Contact.NormalizedPhone (+380...), so both sides must key on the same
+// canonical form.
+func batchKey(phone string) string { return common.CleanPhoneE164(phone) }
+
+// cacheBatchUser records a phone -> user mapping for the current batch.
+func (s *Service) cacheBatchUser(phone string, usr *tg.User) {
+	if usr == nil {
+		return
+	}
+	key := batchKey(phone)
+	if key == "" {
+		return
+	}
+	s.batchMu.Lock()
+	if s.batchUsers == nil {
+		s.batchUsers = make(map[string]*tg.User)
+	}
+	s.batchUsers[key] = usr
+	s.batchMu.Unlock()
+}
+
+// buildChunkContacts converts one chunk of normalized phones into the
+// contacts.importContacts request. ClientID is the index inside the chunk:
+// Telegram echoes it back in res.Imported[].ClientID, which is how the
+// response maps back to exact phones (see mapImportedChunk). Telegram expects
+// the phone digits without the leading "+".
+func buildChunkContacts(chunk []string) []tg.InputPhoneContact {
+	contacts := make([]tg.InputPhoneContact, 0, len(chunk))
+	for ci, ph := range chunk {
+		name := ph
+		if len(name) > 20 {
+			name = name[len(name)-10:]
+		}
+		contacts = append(contacts, tg.InputPhoneContact{ClientID: int64(ci), Phone: ph, FirstName: name, LastName: ""})
+	}
+	return contacts
+}
+
+// mapImportedChunk maps one contacts.importContacts response back to the
+// phones of the chunk that produced it. Telegram echoes the ClientID we sent
+// (the index inside the chunk) in res.Imported[].ClientID, so it identifies
+// the exact input phone — the only reliable link for privacy-hidden users
+// whose usr.Phone is empty. Users already known to the account are absent
+// from res.Imported and are matched by usr.Phone instead. Both maps are keyed
+// by canonical E.164 (batchKey).
+func mapImportedChunk(chunk []string, res *tg.ContactsImportedContacts) (map[string]bool, map[string]*tg.User) {
+	found := make(map[string]bool, len(chunk))
+	users := make(map[string]*tg.User, len(chunk))
+	if res == nil {
+		return found, users
+	}
+	inChunk := make(map[string]bool, len(chunk))
+	for _, p := range chunk {
+		if key := batchKey(p); key != "" {
+			inChunk[key] = true
+		}
+	}
+	userByID := make(map[int64]*tg.User, len(res.Users))
+	for _, u := range res.Users {
+		if usr, ok := u.(*tg.User); ok {
+			userByID[usr.ID] = usr
+		}
+	}
+	// Newly imported contacts: ClientID is the chunk index.
+	for _, ic := range res.Imported {
+		idx := int(ic.ClientID)
+		if idx < 0 || idx >= len(chunk) {
+			continue
+		}
+		usr := userByID[ic.UserID]
+		if usr == nil {
+			continue
+		}
+		if key := batchKey(chunk[idx]); key != "" {
+			found[key] = true
+			users[key] = usr
+		}
+	}
+	// Contacts already known to the account: match by the returned phone.
+	for _, u := range res.Users {
+		usr, ok := u.(*tg.User)
+		if !ok {
+			continue
+		}
+		key := batchKey(usr.Phone)
+		if key == "" || !inChunk[key] {
+			continue
+		}
+		found[key] = true
+		users[key] = usr
+	}
+	return found, users
+}
+
+// SendResolved sends text to a user already resolved by a prior
+// BatchImport, with no resolvePhone/ImportContacts call. Returns a
+// "user not found" error when the phone was not resolved by the batch.
+func (s *Service) SendResolved(phone, msgText string) error {
+	s.mu.Lock()
+	client := s.client
+	connected := s.connected && s.loggedIn
+	s.mu.Unlock()
+	if !connected || client == nil {
+		return fmt.Errorf("telegram not connected/logged in")
+	}
+	key := batchKey(phone)
+	if key == "" {
+		return fmt.Errorf("empty phone")
+	}
+	s.batchMu.Lock()
+	usr := s.batchUsers[key]
+	s.batchMu.Unlock()
+	if usr == nil {
+		return fmt.Errorf("user not found for %s", key)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	peer := &tg.InputPeerUser{UserID: usr.ID, AccessHash: usr.AccessHash}
+	if err := s.sendToPeer(ctx, client, peer, msgText); err != nil {
+		return err
+	}
+	return nil
+}
+
 // BatchImport imports phones in chunks (20 per chunk, 5s pacing between
 // chunks) and returns a map of found phones and a list of imported contacts
-// for batch delete. All logs are English only.
+// for batch delete. The found map is keyed by canonical E.164 (batchKey), the
+// same form cascade looks up. All logs are English only.
 func (s *Service) BatchImport(ctx context.Context, phones []string) (map[string]bool, []cascade.ImportedContact, error) {
 	s.mu.Lock()
 	client := s.client
@@ -1296,14 +1438,7 @@ func (s *Service) BatchImport(ctx context.Context, phones []string) (map[string]
 			end = len(normPhones)
 		}
 		chunk := normPhones[i:end]
-		contacts := make([]tg.InputPhoneContact, 0, len(chunk))
-		for _, ph := range chunk {
-			name := ph
-			if len(name) > 20 {
-				name = name[len(name)-10:]
-			}
-			contacts = append(contacts, tg.InputPhoneContact{Phone: ph, FirstName: name, LastName: ""})
-		}
+		contacts := buildChunkContacts(chunk)
 		if i > 0 {
 			select {
 			case <-ctx.Done():
@@ -1335,32 +1470,12 @@ func (s *Service) BatchImport(ctx context.Context, phones []string) (map[string]
 				continue
 			}
 		}
-		// Mark found phones
-		for _, u := range res.Users {
-			if usr, ok := u.(*tg.User); ok {
-				ph := normalizePhone(usr.Phone)
-				if ph != "" && seen[ph] {
-					found[ph] = true
-				}
-			}
+		foundChunk, usersChunk := mapImportedChunk(chunk, res)
+		for ph := range foundChunk {
+			found[ph] = true
 		}
-		// Fallback: if Phone empty, assume chunk phones that are imported are found
-		if len(found) < len(chunk) {
-			// Use res.Imported to mark those that were newly imported as found
-			for _, ic := range res.Imported {
-				for _, u := range res.Users {
-					if usr, ok := u.(*tg.User); ok && usr.ID == ic.UserID {
-						// find corresponding chunk phone not yet marked
-						for _, cp := range chunk {
-							if !found[cp] {
-								// heuristic: mark first unmatched as found for this user
-								found[cp] = true
-								break
-							}
-						}
-					}
-				}
-			}
+		for ph, usr := range usersChunk {
+			s.cacheBatchUser(ph, usr)
 		}
 		for _, ic := range res.Imported {
 			if !importedIDs[ic.UserID] {

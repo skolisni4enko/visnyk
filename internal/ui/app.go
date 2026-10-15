@@ -25,7 +25,7 @@ import (
 )
 
 // Version injected from main.
-var AppVersion = "0.3.0"
+var AppVersion = "0.4.0"
 
 // App is the Wails-bound application. All methods are exposed to the frontend.
 type App struct {
