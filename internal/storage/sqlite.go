@@ -195,6 +195,22 @@ func (s *Store) AddHistory(e HistoryEntry) error {
 	return err
 }
 
+// AddBatchError appends a batch-level failure note to its history rows.
+// Progress rows are written before batch cleanup completes, so final cleanup
+// errors need this update to remain visible in history after the batch ends.
+func (s *Store) AddBatchError(batchID, message string) (int64, error) {
+	if batchID == "" || message == "" {
+		return 0, nil
+	}
+	result, err := s.db.Exec(`UPDATE history
+		SET error = CASE WHEN COALESCE(error, '') = '' THEN ? ELSE error || '; ' || ? END
+		WHERE batch_id = ? AND instr(COALESCE(error, ''), ?) = 0`, message, message, batchID, message)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 // CreateBatch inserts batch meta.
 func (s *Store) CreateBatch(b Batch) error {
 	preview := b.MessagePreview

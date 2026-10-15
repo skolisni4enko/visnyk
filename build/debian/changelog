@@ -1,3 +1,21 @@
+visnyk (0.4.1-1) noble; urgency=medium
+
+  * Telegram media broadcasts now use batch-resolved users for all batch
+    sizes and remove newly imported contacts before sending.
+  * Honor repeated Telegram flood waits during contact import and cleanup;
+    surface cleanup errors while preserving WhatsApp delivery.
+
+ -- Visnyk Team <team@visnyk.local>  Thu, 15 Oct 2026 12:00:00 +0200
+
+visnyk (0.4.0-1) noble; urgency=low
+
+  * Telegram bulk sends now batch-import contacts (20 per chunk) instead
+    of per-number contacts.resolvePhone, avoiding the resolvePhone rate
+    limit that dropped Telegram delivery by timeout on large batches.
+    Broadcast and direct paths both use the batch-resolved fast path.
+
+ -- Visnyk Team <team@visnyk.local>  Mon, 13 Oct 2026 12:00:00 +0200
+
 visnyk (0.3.0-1) noble; urgency=low
 
   * Broadcast file attachments: 1 file per batch (photo/video/audio up

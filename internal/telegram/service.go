@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -56,6 +57,14 @@ type Service struct {
 	// 1 contacts.resolvePhone call per 3 seconds (client-side).
 	resolveMu   sync.Mutex
 	lastResolve time.Time
+
+	// Batch resolve cache: phone -> resolved user, populated by
+	// BatchImport and consumed by SendResolved so bulk sends never hit the
+	// contacts.resolvePhone rate limit. Guarded by batchMu.
+	batchMu    sync.Mutex
+	batchUsers map[string]*tg.User
+	batchRun   chan struct{}
+	batchRunMu sync.Once
 }
 
 func resolveSessionPath() string {
@@ -1181,8 +1190,9 @@ func (s *Service) BatchSend(ctx context.Context, phones []string, msgText string
 		default:
 		}
 		usr, ok := phoneToUser[ph]
+		key := batchKey(ph)
 		if !ok || usr == nil {
-			results[ph] = fmt.Errorf("user not found for %s", ph)
+			results[key] = fmt.Errorf("user not found for %s", ph)
 			continue
 		}
 		peer := &tg.InputPeerUser{UserID: usr.ID, AccessHash: usr.AccessHash}
@@ -1195,7 +1205,7 @@ func (s *Service) BatchSend(ctx context.Context, phones []string, msgText string
 				fmt.Printf("[telegram] BatchSend flood wait %v for %s\n", wait, ph)
 				select {
 				case <-ctx.Done():
-					results[ph] = ctx.Err()
+					results[key] = ctx.Err()
 					continue
 				case <-time.After(wait):
 				}
@@ -1205,14 +1215,14 @@ func (s *Service) BatchSend(ctx context.Context, phones []string, msgText string
 			}
 			if err != nil {
 				if common.IsTelegramSkippable(err) {
-					results[ph] = fmt.Errorf("skipped: %w", err)
+					results[key] = fmt.Errorf("skipped: %w", err)
 				} else {
-					results[ph] = fmt.Errorf("failed to send: %w", err)
+					results[key] = fmt.Errorf("failed to send: %w", err)
 				}
 				continue
 			}
 		}
-		results[ph] = nil
+		results[key] = nil
 		// per-message pacing for batch sends (8-15s, capped at 30s)
 		select {
 		case <-ctx.Done():
@@ -1255,9 +1265,195 @@ func (s *Service) BatchSend(ctx context.Context, phones []string, msgText string
 	return results, nil
 }
 
+// BeginBatch acquires the batch lifecycle and clears the resolve cache.
+// A canceled waiting batch returns without disturbing the current batch.
+func (s *Service) BeginBatch(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.batchRunMu.Do(func() { s.batchRun = make(chan struct{}, 1) })
+	select {
+	case s.batchRun <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		<-s.batchRun
+		return err
+	}
+	s.batchMu.Lock()
+	s.batchUsers = make(map[string]*tg.User)
+	s.batchMu.Unlock()
+	return nil
+}
+
+// EndBatch clears cached user handles and releases the lock held from
+// BeginBatch. Serializing the complete import-send-delete lifecycle prevents
+// a concurrent batch from clearing users another batch is still sending to.
+func (s *Service) EndBatch() {
+	s.batchMu.Lock()
+	s.batchUsers = nil
+	s.batchMu.Unlock()
+	<-s.batchRun
+}
+
+// batchKey canonicalizes a phone for the batch resolve cache and for the
+// found map returned by BatchImport. cascade looks both up with E.164 values
+// from Contact.NormalizedPhone (+380...), so both sides must key on the same
+// canonical form.
+func batchKey(phone string) string { return common.CleanPhoneE164(phone) }
+
+// cacheBatchUser records a phone -> user mapping for the current batch.
+func (s *Service) cacheBatchUser(phone string, usr *tg.User) {
+	if usr == nil {
+		return
+	}
+	key := batchKey(phone)
+	if key == "" {
+		return
+	}
+	s.batchMu.Lock()
+	if s.batchUsers == nil {
+		s.batchUsers = make(map[string]*tg.User)
+	}
+	s.batchUsers[key] = usr
+	s.batchMu.Unlock()
+}
+
+// buildChunkContacts converts one chunk of normalized phones into the
+// contacts.importContacts request. ClientID is the index inside the chunk:
+// Telegram echoes it back in res.Imported[].ClientID, which is how the
+// response maps back to exact phones (see mapImportedChunk). Telegram expects
+// the phone digits without the leading "+".
+func buildChunkContacts(chunk []string) []tg.InputPhoneContact {
+	contacts := make([]tg.InputPhoneContact, 0, len(chunk))
+	for ci, ph := range chunk {
+		name := ph
+		if len(name) > 20 {
+			name = name[len(name)-10:]
+		}
+		contacts = append(contacts, tg.InputPhoneContact{ClientID: int64(ci), Phone: ph, FirstName: name, LastName: ""})
+	}
+	return contacts
+}
+
+// mapImportedChunk maps one contacts.importContacts response back to the
+// phones of the chunk that produced it. Telegram echoes the ClientID we sent
+// (the index inside the chunk) in res.Imported[].ClientID, so it identifies
+// the exact input phone — the only reliable link for privacy-hidden users
+// whose usr.Phone is empty. Users already known to the account are absent
+// from res.Imported and are matched by usr.Phone instead. Both maps are keyed
+// by canonical E.164 (batchKey).
+func mapImportedChunk(chunk []string, res *tg.ContactsImportedContacts) (map[string]bool, map[string]*tg.User) {
+	found := make(map[string]bool, len(chunk))
+	users := make(map[string]*tg.User, len(chunk))
+	if res == nil {
+		return found, users
+	}
+	inChunk := make(map[string]bool, len(chunk))
+	for _, p := range chunk {
+		if key := batchKey(p); key != "" {
+			inChunk[key] = true
+		}
+	}
+	userByID := make(map[int64]*tg.User, len(res.Users))
+	for _, u := range res.Users {
+		if usr, ok := u.(*tg.User); ok {
+			userByID[usr.ID] = usr
+		}
+	}
+	// Newly imported contacts: ClientID is the chunk index.
+	for _, ic := range res.Imported {
+		idx := int(ic.ClientID)
+		if idx < 0 || idx >= len(chunk) {
+			continue
+		}
+		usr := userByID[ic.UserID]
+		if usr == nil {
+			continue
+		}
+		if key := batchKey(chunk[idx]); key != "" {
+			found[key] = true
+			users[key] = usr
+		}
+	}
+	// Contacts already known to the account: match by the returned phone.
+	for _, u := range res.Users {
+		usr, ok := u.(*tg.User)
+		if !ok {
+			continue
+		}
+		key := batchKey(usr.Phone)
+		if key == "" || !inChunk[key] {
+			continue
+		}
+		found[key] = true
+		users[key] = usr
+	}
+	return found, users
+}
+
+// batchDeleteTargets returns only contacts newly added by Telegram's import
+// response. Contacts already present in the user's address book do not appear
+// in res.Imported and are never removed. seen prevents duplicate deletions
+// across chunks.
+func batchDeleteTargets(res *tg.ContactsImportedContacts, seen map[int64]bool) []cascade.ImportedContact {
+	if res == nil {
+		return nil
+	}
+	userByID := make(map[int64]*tg.User, len(res.Users))
+	for _, u := range res.Users {
+		if usr, ok := u.(*tg.User); ok {
+			userByID[usr.ID] = usr
+		}
+	}
+	var targets []cascade.ImportedContact
+	for _, imported := range res.Imported {
+		if seen[imported.UserID] {
+			continue
+		}
+		seen[imported.UserID] = true
+		if usr := userByID[imported.UserID]; usr != nil {
+			targets = append(targets, cascade.ImportedContact{UserID: usr.ID, AccessHash: usr.AccessHash})
+		}
+	}
+	return targets
+}
+
+// SendResolved sends text to a user already resolved by a prior
+// BatchImport, with no resolvePhone/ImportContacts call. Returns a
+// "user not found" error when the phone was not resolved by the batch.
+func (s *Service) SendResolved(ctx context.Context, phone, msgText string) error {
+	s.mu.Lock()
+	client := s.client
+	connected := s.connected && s.loggedIn
+	s.mu.Unlock()
+	if !connected || client == nil {
+		return fmt.Errorf("telegram not connected/logged in")
+	}
+	key := batchKey(phone)
+	if key == "" {
+		return fmt.Errorf("empty phone")
+	}
+	s.batchMu.Lock()
+	usr := s.batchUsers[key]
+	s.batchMu.Unlock()
+	if usr == nil {
+		return fmt.Errorf("user not found for %s", key)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	peer := &tg.InputPeerUser{UserID: usr.ID, AccessHash: usr.AccessHash}
+	if err := s.sendToPeer(ctx, client, peer, msgText); err != nil {
+		return err
+	}
+	return nil
+}
+
 // BatchImport imports phones in chunks (20 per chunk, 5s pacing between
 // chunks) and returns a map of found phones and a list of imported contacts
-// for batch delete. All logs are English only.
+// for batch delete. The found map is keyed by canonical E.164 (batchKey), the
+// same form cascade looks up. All logs are English only.
 func (s *Service) BatchImport(ctx context.Context, phones []string) (map[string]bool, []cascade.ImportedContact, error) {
 	s.mu.Lock()
 	client := s.client
@@ -1288,7 +1484,7 @@ func (s *Service) BatchImport(ctx context.Context, phones []string) (map[string]
 	for i := 0; i < len(normPhones); i += importChunk {
 		select {
 		case <-ctx.Done():
-			return nil, nil, ctx.Err()
+			return found, toDelete, ctx.Err()
 		default:
 		}
 		end := i + importChunk
@@ -1296,18 +1492,11 @@ func (s *Service) BatchImport(ctx context.Context, phones []string) (map[string]
 			end = len(normPhones)
 		}
 		chunk := normPhones[i:end]
-		contacts := make([]tg.InputPhoneContact, 0, len(chunk))
-		for _, ph := range chunk {
-			name := ph
-			if len(name) > 20 {
-				name = name[len(name)-10:]
-			}
-			contacts = append(contacts, tg.InputPhoneContact{Phone: ph, FirstName: name, LastName: ""})
-		}
+		contacts := buildChunkContacts(chunk)
 		if i > 0 {
 			select {
 			case <-ctx.Done():
-				return nil, nil, ctx.Err()
+				return found, toDelete, ctx.Err()
 			case <-time.After(5*time.Second + time.Duration(rand.Int63n(2000))*time.Millisecond):
 			}
 		}
@@ -1315,64 +1504,43 @@ func (s *Service) BatchImport(ctx context.Context, phones []string) (map[string]
 		res, err := client.API().ContactsImportContacts(cctx, contacts)
 		cancel()
 		if err != nil {
+			if ctx.Err() != nil {
+				return found, toDelete, ctx.Err()
+			}
 			if d, ok := common.FloodWaitDuration(err); ok {
 				wait := d + 2*time.Second + time.Duration(rand.Int63n(int64(3*time.Second)))
 				fmt.Printf("[telegram] BatchImport flood wait %v chunk %d-%d\n", wait, i, end)
-				select {
-				case <-ctx.Done():
-					return nil, nil, ctx.Err()
-				case <-time.After(wait):
-				}
-				cctx2, cancel2 := context.WithTimeout(ctx, 20*time.Second)
-				res, err = client.API().ContactsImportContacts(cctx2, contacts)
-				cancel2()
+				initialErr := err
+				err = retryImportWithFloodWait(ctx, initialErr, waitTelegramFlood, func(parent context.Context) error {
+					cctx2, cancel2 := context.WithTimeout(parent, 20*time.Second)
+					defer cancel2()
+					var retryErr error
+					res, retryErr = client.API().ContactsImportContacts(cctx2, contacts)
+					return retryErr
+				})
 			}
 			if err != nil {
+				if ctx.Err() != nil {
+					return found, toDelete, ctx.Err()
+				}
 				if common.IsTelegramAuthError(err) {
-					return nil, nil, fmt.Errorf("batch import auth error: %w", err)
+					return found, toDelete, fmt.Errorf("batch import auth error: %w", err)
+				}
+				if _, stillFlood := common.FloodWaitDuration(err); stillFlood {
+					return found, toDelete, fmt.Errorf("batch import flood wait persisted after retry: %w", err)
 				}
 				fmt.Printf("[telegram] BatchImport chunk %d-%d failed: %v\n", i, end, err)
 				continue
 			}
 		}
-		// Mark found phones
-		for _, u := range res.Users {
-			if usr, ok := u.(*tg.User); ok {
-				ph := normalizePhone(usr.Phone)
-				if ph != "" && seen[ph] {
-					found[ph] = true
-				}
-			}
+		foundChunk, usersChunk := mapImportedChunk(chunk, res)
+		for ph := range foundChunk {
+			found[ph] = true
 		}
-		// Fallback: if Phone empty, assume chunk phones that are imported are found
-		if len(found) < len(chunk) {
-			// Use res.Imported to mark those that were newly imported as found
-			for _, ic := range res.Imported {
-				for _, u := range res.Users {
-					if usr, ok := u.(*tg.User); ok && usr.ID == ic.UserID {
-						// find corresponding chunk phone not yet marked
-						for _, cp := range chunk {
-							if !found[cp] {
-								// heuristic: mark first unmatched as found for this user
-								found[cp] = true
-								break
-							}
-						}
-					}
-				}
-			}
+		for ph, usr := range usersChunk {
+			s.cacheBatchUser(ph, usr)
 		}
-		for _, ic := range res.Imported {
-			if !importedIDs[ic.UserID] {
-				importedIDs[ic.UserID] = true
-				for _, u := range res.Users {
-					if usr, ok := u.(*tg.User); ok && usr.ID == ic.UserID {
-						toDelete = append(toDelete, cascade.ImportedContact{UserID: usr.ID, AccessHash: usr.AccessHash})
-						break
-					}
-				}
-			}
-		}
+		toDelete = append(toDelete, batchDeleteTargets(res, importedIDs)...)
 		fmt.Printf("[telegram] BatchImport chunk %d-%d ok users=%d imported=%d\n", i, end, len(res.Users), len(res.Imported))
 	}
 	return found, toDelete, nil
@@ -1391,10 +1559,11 @@ func (s *Service) BatchDelete(ctx context.Context, toDelete []cascade.ImportedCo
 	if !connected || client == nil {
 		return fmt.Errorf("telegram not connected/logged in")
 	}
+	var deleteErr error
 	for i := 0; i < len(toDelete); i += deleteChunk {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return errors.Join(deleteErr, ctx.Err())
 		default:
 		}
 		end := i + deleteChunk
@@ -1406,23 +1575,53 @@ func (s *Service) BatchDelete(ctx context.Context, toDelete []cascade.ImportedCo
 		for _, ic := range chunk {
 			inputs = append(inputs, &tg.InputUser{UserID: ic.UserID, AccessHash: ic.AccessHash})
 		}
-		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		_, err := client.API().ContactsDeleteContacts(cctx, inputs)
-		cancel()
+		deleteChunk := func(parent context.Context) error {
+			cctx, cancel := context.WithTimeout(parent, 15*time.Second)
+			defer cancel()
+			_, err := client.API().ContactsDeleteContacts(cctx, inputs)
+			return err
+		}
+		err := deleteChunkWithFloodRetry(ctx, deleteChunk, waitTelegramFlood)
 		if err != nil {
 			fmt.Printf("[telegram] BatchDelete chunk %d-%d failed: %v\n", i, end, err)
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("delete imported contacts %d-%d: %w", i, end, err))
+			if _, stillFlood := common.FloodWaitDuration(err); stillFlood {
+				// Never send another contacts.* request after the one allowed
+				// retry still receives FLOOD_WAIT.
+				return deleteErr
+			}
+			if common.IsTelegramAuthError(err) {
+				return deleteErr
+			}
 		} else {
 			fmt.Printf("[telegram] BatchDelete chunk %d-%d ok users=%d\n", i, end, len(chunk))
 		}
 		if end < len(toDelete) {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return errors.Join(deleteErr, ctx.Err())
 			case <-time.After(1 * time.Second):
 			}
 		}
 	}
-	return nil
+	return deleteErr
+}
+
+func deleteChunkWithFloodRetry(ctx context.Context, request func(context.Context) error, wait func(context.Context, time.Duration) error) error {
+	err := request(ctx)
+	if err == nil {
+		return nil
+	}
+	if _, isFlood := common.FloodWaitDuration(err); !isFlood {
+		return err
+	}
+	err = retryFloodWait(ctx, err, wait, request)
+	if retryWait, stillFlood := common.FloodWaitDuration(err); stillFlood {
+		if waitErr := wait(ctx, retryWait); waitErr != nil {
+			return errors.Join(err, waitErr)
+		}
+	}
+	return err
 }
 
 // CheckSession validates the session against the server (cheap Auth.Status,

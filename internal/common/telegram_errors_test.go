@@ -74,3 +74,20 @@ func TestIsTelegramNotFound(t *testing.T) {
 		t.Fatal("flood must not be not-found")
 	}
 }
+
+func TestIsUserNotFound(t *testing.T) {
+	for _, s := range []string{
+		"user not found for +380991234567",
+		"ResolvePhone: PHONE_NOT_OCCUPIED",
+	} {
+		if !IsUserNotFound(errors.New(s)) {
+			t.Fatalf("%q must be user-not-found", s)
+		}
+	}
+	if IsUserNotFound(errors.New("FLOOD_WAIT_10")) {
+		t.Fatal("flood must not be user-not-found")
+	}
+	if IsUserNotFound(nil) {
+		t.Fatal("nil must not be user-not-found")
+	}
+}

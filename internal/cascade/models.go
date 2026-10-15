@@ -68,6 +68,33 @@ type MediaSender interface {
 	SendMedia(phone, caption string, att *Attachment) error
 }
 
+// PartialDeliveryError reports that the file itself was delivered but a
+// follow-up text chunk failed. Callers must not retry the whole media send.
+type PartialDeliveryError struct {
+	Err error
+}
+
+func (e *PartialDeliveryError) Error() string {
+	if e == nil || e.Err == nil {
+		return "media delivered but follow-up text failed"
+	}
+	return "media delivered but follow-up text failed: " + e.Err.Error()
+}
+
+func (e *PartialDeliveryError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// BatchMediaResolver sends media to a user resolved by a prior batch import.
+// It avoids per-recipient contacts.resolvePhone calls for file broadcasts.
+type BatchMediaResolver interface {
+	BatchResolver
+	SendResolvedMedia(ctx context.Context, phone, caption string, att *Attachment) error
+}
+
 // BatchSender is an optional batch path for Telegram: import all contacts
 // in chunks, send to all resolved users, then delete the temporary
 // contacts in one batch. Avoids per-contact "Test" pollution and
@@ -75,7 +102,9 @@ type MediaSender interface {
 type BatchSender interface {
 	Messenger
 	// BatchSend imports phones in chunks, sends message to each found user,
-	// and deletes the temporary contacts. Returns per-phone error (nil = sent).
+	// and deletes the temporary contacts. Returns per-phone error (nil = sent)
+	// keyed by canonical E.164 (common.CleanPhoneE164), matching
+	// Contact.NormalizedPhone.
 	BatchSend(ctx context.Context, phones []string, message string) (map[string]error, error)
 }
 
@@ -85,8 +114,27 @@ type BatchSender interface {
 // capped at 30s) so PEER_FLOOD is avoided.
 type BatchImporter interface {
 	Messenger
+	// BatchImport returns found phones keyed by canonical E.164
+	// (common.CleanPhoneE164), matching Contact.NormalizedPhone.
 	BatchImport(ctx context.Context, phones []string) (map[string]bool, []ImportedContact, error)
 	BatchDelete(ctx context.Context, toDelete []ImportedContact) error
+}
+
+// BatchResolver is the batch fast path for bulk sends: pre-import all
+// contacts once via BatchImport, then send to the cached users via
+// SendResolved — no per-contact contacts.resolvePhone/ImportContacts.
+// This avoids the contacts.resolvePhone rate limit (1 call / 3s, plus a
+// per-account budget) that otherwise throttles large broadcasts.
+type BatchResolver interface {
+	BatchImporter
+	// BeginBatch acquires the batch lifecycle and clears the resolve cache.
+	BeginBatch(ctx context.Context) error
+	// EndBatch clears the batch cache and releases its lifecycle lock.
+	EndBatch()
+	// SendResolved sends to a user resolved by a prior BatchImport.
+	// Returns a "user not found" error when the phone was not resolved.
+	// The phone is a canonical E.164 value from Contact.NormalizedPhone.
+	SendResolved(ctx context.Context, phone, message string) error
 }
 
 // ImportedContact is a minimal handle for batch delete, avoids importing tg.
